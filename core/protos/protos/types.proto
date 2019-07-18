@@ -18,3 +18,8 @@ message ValidatorStake {
     string public_key = 2;
     Uint128 amount = 4;
 }
+
+message FraudProof {
+    bytes block_hash = 1;
+    repeated bytes relevant_storage = 2;
+}

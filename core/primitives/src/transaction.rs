@@ -21,7 +21,7 @@ use crate::utils::{account_to_shard_id, proto_to_result};
 
 pub type LogEntry = String;
 
-#[derive(Hash, PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
+#[derive(PartialEq, Eq, Debug, Clone, Serialize, Deserialize)]
 pub enum TransactionBody {
     CreateAccount(CreateAccountTransaction),
     DeployContract(DeployContractTransaction),
@@ -31,6 +31,7 @@ pub enum TransactionBody {
     SwapKey(SwapKeyTransaction),
     AddKey(AddKeyTransaction),
     DeleteKey(DeleteKeyTransaction),
+    FishermanChallenge(FishermanChallengeTransaction),
 }
 
 impl TransactionBody {
@@ -44,7 +45,7 @@ impl TransactionBody {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct CreateAccountTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -92,7 +93,7 @@ impl fmt::Debug for CreateAccountTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DeployContractTransaction {
     pub nonce: Nonce,
     pub contract_id: AccountId,
@@ -133,7 +134,7 @@ impl From<DeployContractTransaction> for transaction_proto::DeployContractTransa
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct FunctionCallTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -185,7 +186,7 @@ impl fmt::Debug for FunctionCallTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub struct SendMoneyTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -218,7 +219,7 @@ impl From<SendMoneyTransaction> for transaction_proto::SendMoneyTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Debug, Clone)]
 pub struct StakeTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -251,7 +252,7 @@ impl From<StakeTransaction> for transaction_proto::StakeTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct SwapKeyTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -294,7 +295,7 @@ impl fmt::Debug for SwapKeyTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct AddKeyTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -340,7 +341,7 @@ impl fmt::Debug for AddKeyTransaction {
     }
 }
 
-#[derive(Hash, Serialize, Deserialize, PartialEq, Eq, Clone)]
+#[derive(Serialize, Deserialize, PartialEq, Eq, Clone)]
 pub struct DeleteKeyTransaction {
     pub nonce: Nonce,
     pub originator: AccountId,
@@ -385,6 +386,7 @@ impl TransactionBody {
             TransactionBody::SwapKey(t) => t.nonce,
             TransactionBody::AddKey(t) => t.nonce,
             TransactionBody::DeleteKey(t) => t.nonce,
+            TransactionBody::FishermanChallenge(t) => t.nonce,
         }
     }
 
@@ -398,6 +400,7 @@ impl TransactionBody {
             TransactionBody::SwapKey(t) => t.originator.clone(),
             TransactionBody::AddKey(t) => t.originator.clone(),
             TransactionBody::DeleteKey(t) => t.originator.clone(),
+            TransactionBody::FishermanChallenge(t) => t.originator.clone(),
         }
     }
 
@@ -412,6 +415,7 @@ impl TransactionBody {
             TransactionBody::SwapKey(_) => None,
             TransactionBody::AddKey(_) => None,
             TransactionBody::DeleteKey(_) => None,
+            TransactionBody::FishermanChallenge(t) => None,
         }
     }
 
@@ -449,6 +453,7 @@ impl TransactionBody {
                 let proto: transaction_proto::DeleteKeyTransaction = t.into();
                 proto.write_to_bytes()
             }
+            TransactionBody::FishermanChallenge(t) => unimplemented!(),
         };
         let bytes = bytes.unwrap();
         hash(&bytes)
@@ -547,6 +552,10 @@ impl TryFrom<transaction_proto::SignedTransaction> for SignedTransaction {
                 bytes = t.write_to_bytes();
                 TransactionBody::DeleteKey(DeleteKeyTransaction::try_from(t)?)
             }
+            Some(transaction_proto::SignedTransaction_oneof_body::fisherman_challenge(t)) => {
+                bytes = t.write_to_bytes();
+                TransactionBody::FishermanChallenge(FishermanChallengeTransaction::try_from(t)?)
+            }
             None => return Err("No such transaction body type".into()),
         };
         let bytes = bytes.map_err(|e| format!("{}", e))?;
@@ -590,6 +599,7 @@ impl From<SignedTransaction> for transaction_proto::SignedTransaction {
             TransactionBody::DeleteKey(t) => {
                 transaction_proto::SignedTransaction_oneof_body::delete_key(t.into())
             }
+            TransactionBody::FishermanChallenge(t) => unimplemented!(),
         };
         transaction_proto::SignedTransaction {
             body: Some(body),
@@ -604,14 +614,84 @@ impl From<SignedTransaction> for transaction_proto::SignedTransaction {
     }
 }
 
-#[derive(Hash, Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
 pub enum ReceiptBody {
     NewCall(AsyncCall),
     Callback(CallbackResult),
     Refund(Balance),
 }
 
-#[derive(Hash, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct FishermanChallengeTransaction {
+    pub nonce: Nonce,
+    pub originator: AccountId,
+    pub body: FraudProof,
+}
+
+impl TryFrom<near_protos::types::FraudProof> for FraudProof {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(t: near_protos::types::FraudProof) -> Result<Self, Self::Error> {
+        Ok(FraudProof {
+            block_hash: t.block_hash.try_into()?,
+            partial_prev_state: vec![]
+        })
+    }
+}
+
+impl From<FraudProof> for near_protos::types::FraudProof {
+    fn from(t: FraudProof) -> near_protos::types::FraudProof {
+        near_protos::types::FraudProof {
+            ..Default::default()
+        }
+    }
+}
+
+impl TryFrom<transaction_proto::FishermanChallengeTransaction> for FishermanChallengeTransaction {
+    type Error = Box<dyn std::error::Error>;
+
+    fn try_from(t: transaction_proto::FishermanChallengeTransaction) -> Result<Self, Self::Error> {
+        Ok(FishermanChallengeTransaction {
+            nonce: t.nonce,
+            originator: t.originator_id,
+            body: t.fraud_proof.unwrap_or_default().try_into()?
+        })
+    }
+}
+
+impl From<FishermanChallengeTransaction> for transaction_proto::FishermanChallengeTransaction {
+    fn from(t: FishermanChallengeTransaction) -> transaction_proto::FishermanChallengeTransaction {
+        transaction_proto::FishermanChallengeTransaction {
+            nonce: t.nonce,
+            originator_id: t.originator,
+            fraud_proof: SingularPtrField::some(t.body.into()),
+            ..Default::default()
+        }
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, Debug, PartialEq, Eq)]
+pub struct FraudProof {
+    // Hash of the block with an invalid state transition.
+    block_hash: CryptoHash,
+    // trie nodes for relevant storage
+    partial_prev_state: Vec<Vec<u8>>,
+//    // previous block has previous state root + transactions
+//    prev_block_header: BlockHeader,
+//    prev_transactions: Vec<SignedTransaction>,
+//    // key/value pairs for relevant storage
+//    partial_prev_state: Vec<(Vec<u8>, Vec<u8>)>,
+//    // next block header has next state root signed
+//    next_block_header: BlockHeader,
+}
+
+impl Hash for FishermanChallengeTransaction {
+    fn hash<H: Hasher>(&self, state: &mut H) {
+        unimplemented!()
+    }
+}
+
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AsyncCall {
     pub amount: Balance,
     pub method_name: Vec<u8>,
@@ -786,7 +866,7 @@ impl fmt::Debug for Callback {
     }
 }
 
-#[derive(Hash, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallbackInfo {
     // callback id
     pub id: CallbackId,
@@ -833,7 +913,7 @@ impl fmt::Debug for CallbackInfo {
     }
 }
 
-#[derive(Hash, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct CallbackResult {
     // callback id
     pub info: CallbackInfo,
@@ -970,7 +1050,7 @@ impl ReceiptTransaction {
     }
 }
 
-#[derive(Hash, Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Eq, Clone, Serialize, Deserialize)]
 pub enum TransactionStatus {
     Unknown,
     Completed,

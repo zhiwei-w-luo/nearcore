@@ -46,6 +46,7 @@ impl TransactionsCosts {
             SwapKey(_) => self.swap_key.clone(),
             AddKey(_) => self.add_key.clone(),
             DeleteKey(_) => self.delete_key.clone(),
+            FishermanChallenge(_) => unimplemented!(),
         }
     }
 }

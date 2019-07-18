@@ -290,6 +290,7 @@ impl Runtime {
             TransactionBody::DeleteKey(ref t) => {
                 system::delete_key(state_update, t, &mut originator, transaction.get_hash())
             }
+            TransactionBody::FishermanChallenge(ref t) => unimplemented!(),
         }
     }
 

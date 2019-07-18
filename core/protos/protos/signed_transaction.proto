@@ -3,6 +3,7 @@ syntax = "proto3";
 import "wrappers.proto";
 import "access_key.proto";
 import "uint128.proto";
+import "types.proto";
 
 message CreateAccountTransaction {
     uint64 nonce = 1;
@@ -62,6 +63,12 @@ message DeleteKeyTransaction {
     bytes cur_key = 3;
 }
 
+message FishermanChallengeTransaction {
+    uint64 nonce = 1;
+    string originator_id = 2;
+    FraudProof fraud_proof = 3;
+}
+
 message SignedTransaction {
     bytes signature = 1;
     // In case this TX uses AccessKey, it needs to provide the public_key
@@ -75,6 +82,6 @@ message SignedTransaction {
         SwapKeyTransaction swap_key = 7;
         AddKeyTransaction add_key = 8;
         DeleteKeyTransaction delete_key = 9;
-        // Next 11
+        FishermanChallengeTransaction fisherman_challenge = 11;
     }
 }
