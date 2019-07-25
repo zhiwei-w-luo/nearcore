@@ -366,6 +366,46 @@ impl ValidatorManager {
         }
     }
 
+    // TODO XXX MOO: the common logic needs to be refactored out into a single function after merge
+    pub fn get_next_epoch_hash(
+        &self,
+        current_hash: CryptoHash,
+        parent_hash: CryptoHash,
+    ) -> Result<CryptoHash, ValidatorError> {
+        if parent_hash == CryptoHash::default() {
+            assert!(false);
+        }
+
+        let prev_block_header = self
+            .store
+            .get_ser::<BlockHeader>(COL_BLOCK_HEADER, parent_hash.as_ref())
+            .map_err(|err| ValidatorError::Other(err.to_string()))?
+            .ok_or(ValidatorError::MissingBlock(parent_hash))?;
+
+        let prev_height = prev_block_header.height;
+
+        // TODO(1049): handle that config epoch length can change over time from runtime.
+        let parent_info =
+            self.get_index_info(parent_hash).map_err(|_| ValidatorError::EpochOutOfBounds)?;
+        let epoch_start_index = if parent_hash == parent_info.epoch_start_hash {
+            parent_info.index
+        } else {
+            let epoch_start_info = self.get_index_info(parent_info.epoch_start_hash)?;
+            epoch_start_info.index
+        };
+
+        // We compare to the height of the previous block and not to index so that the epoch is fully
+        //    determined by the previous block. This allows chunk producers to know the epoch of the
+        //    *next* block, and know whom to distribute chunk parts to
+        if epoch_start_index + self.config.epoch_length <= prev_height {
+            // If this is next epoch index, return parent's epoch hash and 0 as offset.
+            Ok(current_hash)
+        } else {
+            // If index is within the same epoch as it's parent, return it's epoch parent and current offset from this epoch start.
+            Ok(parent_info.epoch_start_hash)
+        }
+    }
+
     /// Get previous epoch hash given current epoch hash
     fn get_prev_epoch_hash(&self, epoch_hash: CryptoHash) -> Result<CryptoHash, ValidatorError> {
         let parent_hash = self.get_index_info(epoch_hash)?.prev_hash;

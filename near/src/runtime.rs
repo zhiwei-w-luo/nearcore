@@ -309,6 +309,28 @@ impl RuntimeAdapter for NightshadeRuntime {
         false
     }
 
+    fn will_care_about_shard(
+        &self,
+        account_id: &AccountId,
+        current_hash: CryptoHash,
+        parent_hash: CryptoHash,
+        shard_id: ShardId,
+    ) -> bool {
+        let mut vm = self.validator_manager.write().expect(POISONED_LOCK_ERR);
+        let epoch_hash = match vm.get_next_epoch_hash(current_hash, parent_hash) {
+            Ok(tuple) => tuple,
+            Err(_) => return false,
+        };
+        if let Ok(validator_assignment) = vm.get_validators(epoch_hash) {
+            for (index, _seats) in validator_assignment.chunk_producers[shard_id as usize].iter() {
+                if validator_assignment.validators[*index].account_id == *account_id {
+                    return true;
+                }
+            }
+        }
+        false
+    }
+
     fn validate_tx(
         &self,
         _shard_id: ShardId,
@@ -433,6 +455,30 @@ impl RuntimeAdapter for NightshadeRuntime {
         }
         store_update.commit()?;
         Ok(())
+    }
+
+    fn is_epoch_start(
+        &self,
+        parent_hash: CryptoHash,
+        index: BlockIndex,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        let vm = self.validator_manager.read().expect(POISONED_LOCK_ERR);
+        let (_epoch_hash, offset) = vm.get_epoch_offset(parent_hash, index)?;
+        if offset == index {
+            // Specialcase the first block after genesis, which is considered to be the epoch
+            // start even though it shares the epoch with the genesis itself
+            Ok(true)
+        } else {
+            Ok(offset == 0)
+        }
+    }
+
+    fn get_epoch_hash(
+        &self,
+        parent_hash: CryptoHash,
+    ) -> Result<CryptoHash, Box<dyn std::error::Error>> {
+        let vm = self.validator_manager.read().expect(POISONED_LOCK_ERR);
+        Ok(vm.get_epoch_offset(parent_hash, 0)?.0)
     }
 }
 

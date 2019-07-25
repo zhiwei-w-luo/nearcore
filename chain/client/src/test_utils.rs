@@ -6,13 +6,15 @@ use chrono::{DateTime, Utc};
 
 use near_chain::test_utils::KeyValueRuntime;
 use near_network::{
-    NetworkClientMessages, NetworkRequests, NetworkResponses, PeerInfo, PeerManagerActor,
+    FullPeerInfo, NetworkClientMessages, NetworkRequests, NetworkResponses, PeerInfo,
+    PeerManagerActor,
 };
 use near_primitives::crypto::signer::InMemorySigner;
 use near_store::test_utils::create_test_store;
 
 use crate::{BlockProducer, ClientActor, ClientConfig, ViewClientActor};
 
+use near_network::types::PeerChainInfo;
 use std::ops::DerefMut;
 
 pub type NetworkMock = Mocker<PeerManagerActor>;
@@ -112,7 +114,7 @@ pub fn setup_mock_all_validators(
             let _client_addr = ctx.address();
             let pm = NetworkMock::mock(Box::new(move |msg, _ctx| {
                 let msg = msg.downcast_ref::<NetworkRequests>().unwrap();
-                let (resp, perform_default) =
+                let (mut resp, perform_default) =
                     network_mock1.write().unwrap().deref_mut()(account_id.to_string(), msg);
 
                 if perform_default {
@@ -125,6 +127,25 @@ pub fn setup_mock_all_validators(
                     let my_key_pair = my_key_pair.unwrap();
 
                     match msg {
+                        NetworkRequests::FetchInfo => {
+                            resp = NetworkResponses::Info {
+                                num_active_peers: key_pairs.len(),
+                                peer_max_count: key_pairs.len() as u32,
+                                most_weight_peers: key_pairs
+                                    .iter()
+                                    .map(|peer_info| FullPeerInfo {
+                                        peer_info: peer_info.clone(),
+                                        chain_info: PeerChainInfo {
+                                            genesis: Default::default(),
+                                            height: 5,
+                                            total_weight: 100.into(),
+                                        },
+                                    })
+                                    .collect(),
+                                sent_bytes_per_sec: 0,
+                                received_bytes_per_sec: 0,
+                            }
+                        }
                         NetworkRequests::Block { block } => {
                             for (client, _) in connectors1.write().unwrap().iter() {
                                 client.do_send(NetworkClientMessages::Block(
@@ -178,6 +199,15 @@ pub fn setup_mock_all_validators(
                                     connectors1.write().unwrap()[i]
                                         .0
                                         .do_send(NetworkClientMessages::ChunkPart(part.clone()));
+                                }
+                            }
+                        }
+                        NetworkRequests::StateRequest { shard_id, hash, peer_id } => {
+                            for (i, peer_info) in key_pairs.iter().enumerate() {
+                                if peer_info.id == *peer_id {
+                                    connectors1.write().unwrap()[i].0.do_send(
+                                        NetworkClientMessages::StateRequest(*shard_id, *hash),
+                                    );
                                 }
                             }
                         }

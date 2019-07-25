@@ -226,6 +226,26 @@ impl RuntimeAdapter for KeyValueRuntime {
         false
     }
 
+    fn will_care_about_shard(
+        &self,
+        account_id: &AccountId,
+        _current_hash: CryptoHash,
+        parent_hash: CryptoHash,
+        shard_id: ShardId,
+    ) -> bool {
+        let validators =
+            &self.validators[(self.get_epoch(parent_hash).unwrap() + 1) % self.validators.len()];
+        assert_eq!((validators.len() as u64) % self.num_shards(), 0);
+        let validators_per_shard = self.validators_per_shard;
+        let offset = (shard_id / validators_per_shard * validators_per_shard) as usize;
+        for validator in validators[offset..offset + (validators_per_shard as usize)].iter() {
+            if validator.account_id == *account_id {
+                return true;
+            }
+        }
+        false
+    }
+
     fn validate_tx(
         &self,
         _shard_id: ShardId,
@@ -451,6 +471,38 @@ impl RuntimeAdapter for KeyValueRuntime {
         _payload: Vec<u8>,
     ) -> Result<(), Box<dyn std::error::Error>> {
         Ok(())
+    }
+
+    fn is_epoch_start(
+        &self,
+        parent_hash: CryptoHash,
+        _index: BlockIndex,
+    ) -> Result<bool, Box<dyn std::error::Error>> {
+        if parent_hash == CryptoHash::default() {
+            assert!(false);
+            Ok(true)
+        } else {
+            let prev_block_header = self
+                .store
+                .get_ser::<BlockHeader>(COL_BLOCK_HEADER, parent_hash.as_ref())?
+                .ok_or("Missing block when computing the epoch")?;
+            let prev_prev_hash = prev_block_header.prev_hash;
+            if prev_prev_hash == CryptoHash::default() {
+                // Specialcase the first block after genesis, which is considered to be the epoch
+                // start even though it shares the epoch with the genesis itself
+                Ok(true)
+            } else {
+                Ok(self.get_prev_height(parent_hash)? / 5
+                    != self.get_prev_height(prev_prev_hash)? / 5)
+            }
+        }
+    }
+
+    fn get_epoch_hash(
+        &self,
+        parent_hash: CryptoHash,
+    ) -> Result<CryptoHash, Box<dyn std::error::Error>> {
+        Ok(hash_struct(&self.get_epoch(parent_hash)?))
     }
 }
 
