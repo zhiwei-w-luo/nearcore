@@ -1,6 +1,3 @@
-#[macro_use]
-extern crate lazy_static;
-
 pub use chain::{collect_receipts, Chain, ChainGenesis, MAX_ORPHAN_SIZE};
 pub use error::{Error, ErrorKind};
 pub use store::{ChainStore, ChainStoreAccess};
@@ -11,7 +8,6 @@ pub use types::{
 
 mod chain;
 mod error;
-mod metrics;
 mod store;
 pub mod test_utils;
 pub mod types;
