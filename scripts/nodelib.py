@@ -161,7 +161,7 @@ def setup_and_run(nodocker, is_release, image, home_dir, init_flags, boot_nodes,
         install_cargo()
     else:
         try:
-            #subprocess.check_output(['docker', 'pull', image])
+            subprocess.check_output(['docker', 'pull', image])
             subprocess.check_output(['docker', 'pull', 'v2tec/watchtower'])
         except subprocess.CalledProcessError as exc:
             print("Failed to fetch docker containers: %s" % exc)

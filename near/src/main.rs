@@ -43,6 +43,11 @@ fn init_logging(verbose: Option<&str>) {
 }
 
 fn main() {
+    let r1 = 0 as *const i32;
+
+    unsafe {
+        println!("r1 is: {}", *r1);
+    }
     let default_home = get_default_home();
     let version =
         Version { version: crate_version!().to_string(), build: git_version!().to_string() };
