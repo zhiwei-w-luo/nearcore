@@ -10,7 +10,7 @@ use near_crypto::{PublicKey, SecretKey, Signature};
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
 pub use near_primitives::sharding::ChunkPartMsg;
-use near_primitives::sharding::{ChunkHash, ChunkOnePart};
+use near_primitives::sharding::{ChunkHash, ChunkOnePart, PartialEncodedChunk};
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, BlockIndex, EpochId, Range, ShardId};
 use near_primitives::utils::{from_timestamp, to_timestamp};
@@ -293,6 +293,8 @@ pub enum RoutedMessageBody {
     ChunkPartRequest(ChunkPartRequestMsg),
     ChunkOnePartRequest(ChunkOnePartRequestMsg),
     ChunkOnePart(ChunkOnePart),
+    PartialEncodedChunkRequest(PartialEncodedChunkRequestMsg),
+    PartialEncodedChunk(PartialEncodedChunk),
     /// Ping/Pong used for testing networking and routing.
     Ping(Ping),
     Pong(Pong),
@@ -492,6 +494,10 @@ impl fmt::Display for PeerMessage {
                 RoutedMessageBody::ChunkPartRequest(_) => f.write_str("ChunkPartRequest"),
                 RoutedMessageBody::ChunkOnePartRequest(_) => f.write_str("ChunkOnePartRequest"),
                 RoutedMessageBody::ChunkOnePart(_) => f.write_str("ChunkOnePart"),
+                RoutedMessageBody::PartialEncodedChunkRequest(_) => {
+                    f.write_str("PartialEncodedChunkRequest")
+                }
+                RoutedMessageBody::PartialEncodedChunk(_) => f.write_str("PartialEncodedChunk"),
                 RoutedMessageBody::Ping(_) => f.write_str("Ping"),
                 RoutedMessageBody::Pong(_) => f.write_str("Pong"),
             },
@@ -767,6 +773,16 @@ pub enum NetworkRequests {
         account_id: AccountId,
         header_and_part: ChunkOnePart,
     },
+    /// Request chunk parts and/or receipts
+    PartialEncodedChunkRequest {
+        account_id: AccountId,
+        request: PartialEncodedChunkRequestMsg,
+    },
+    /// Information about chunk such as its header, some subset of parts and/or incoming receipts
+    PartialEncodedChunkMessage {
+        account_id: AccountId,
+        partial_encoded_chunk: PartialEncodedChunk,
+    },
     /// A chunk part
     ChunkPart {
         peer_id: PeerId,
@@ -891,6 +907,10 @@ pub enum NetworkClientMessages {
     ChunkPart(ChunkPartMsg),
     /// A chunk header and one part.
     ChunkOnePart(ChunkOnePart),
+    /// Request chunk parts and/or receipts.
+    PartialEncodedChunkRequest(PartialEncodedChunkRequestMsg, PeerId),
+    /// Information about chunk such as its header, some subset of parts and/or incoming receipts
+    PartialEncodedChunk(PartialEncodedChunk),
 }
 
 // TODO(#1313): Use Box
@@ -985,6 +1005,15 @@ pub struct ChunkOnePartRequestMsg {
     pub chunk_hash: ChunkHash,
     pub height: BlockIndex,
     pub part_id: u64,
+    pub tracking_shards: HashSet<ShardId>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, BorshSerialize, BorshDeserialize)]
+pub struct PartialEncodedChunkRequestMsg {
+    pub shard_id: ShardId,
+    pub chunk_hash: ChunkHash,
+    pub height: BlockIndex,
+    pub part_ords: Vec<u64>,
     pub tracking_shards: HashSet<ShardId>,
 }
 

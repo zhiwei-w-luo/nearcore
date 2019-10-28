@@ -26,7 +26,9 @@ use near_primitives::errors::RuntimeError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{merklize, MerklePath};
 use near_primitives::receipt::Receipt;
-use near_primitives::sharding::{ChunkOnePart, EncodedShardChunk, ShardChunkHeader};
+use near_primitives::sharding::{
+    ChunkOnePart, EncodedShardChunk, PartialEncodedChunk, ShardChunkHeader,
+};
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, BlockIndex, EpochId, ShardId};
 use near_primitives::unwrap_or_return;
@@ -450,7 +452,7 @@ impl Client {
             )
         };
         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-            self.shards_mgr.request_chunks(missing_chunks, false).unwrap();
+            self.shards_mgr.request_chunks(missing_chunks).unwrap();
         }
         let unwrapped_accepted_blocks = accepted_blocks.write().unwrap().drain(..).collect();
         (unwrapped_accepted_blocks, result)
@@ -466,6 +468,13 @@ impl Client {
         }
     }
 
+    pub fn process_partial_encoded_chunk(
+        &mut self,
+        _partial_encoded_chunk: PartialEncodedChunk,
+    ) -> Result<Vec<AcceptedBlock>, Error> {
+        Ok(vec![])
+    }
+
     pub fn process_chunk_one_part(
         &mut self,
         one_part_msg: ChunkOnePart,
@@ -475,8 +484,8 @@ impl Client {
 
         let has_all_one_parts = match process_result {
             ProcessChunkOnePartResult::Known => return Ok(vec![]),
-            ProcessChunkOnePartResult::HaveAllOneParts => true,
-            ProcessChunkOnePartResult::NeedMoreOneParts => false,
+            ProcessChunkOnePartResult::HaveAllPartsAndReceipts => true,
+            ProcessChunkOnePartResult::NeedMoreOnePartsOrReceipts => false,
         };
 
         // After processing one part we might need to request more parts or one parts.
@@ -500,7 +509,7 @@ impl Client {
             true,
         );
         if !has_all_one_parts || (care_about_shard && builds_on_head) {
-            self.shards_mgr.request_chunks(vec![one_part_msg.header], !has_all_one_parts).unwrap();
+            self.shards_mgr.request_chunks(vec![one_part_msg.header]).unwrap();
         }
         if has_all_one_parts {
             return Ok(self.process_blocks_with_missing_chunks(prev_block_hash));
@@ -673,7 +682,7 @@ impl Client {
             accepted_blocks.write().unwrap().push(accepted_block);
         }, |missing_chunks| blocks_missing_chunks.write().unwrap().push(missing_chunks));
         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-            self.shards_mgr.request_chunks(missing_chunks, false).unwrap();
+            self.shards_mgr.request_chunks(missing_chunks).unwrap();
         }
         let unwrapped_accepted_blocks = accepted_blocks.write().unwrap().drain(..).collect();
         unwrapped_accepted_blocks
@@ -997,7 +1006,7 @@ impl Client {
                     )?;
 
                     for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-                        self.shards_mgr.request_chunks(missing_chunks, false).unwrap();
+                        self.shards_mgr.request_chunks(missing_chunks).unwrap();
                     }
                     let unwrapped_accepted_blocks =
                         accepted_blocks.write().unwrap().drain(..).collect();

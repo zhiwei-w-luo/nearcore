@@ -305,6 +305,22 @@ pub fn setup_mock_all_validators(
                                 }
                             }
                         }
+                        NetworkRequests::PartialEncodedChunkMessage {
+                            account_id,
+                            partial_encoded_chunk,
+                        } => {
+                            for (i, name) in validators_clone2.iter().flatten().enumerate() {
+                                if name == account_id {
+                                    if !drop_chunks || !sample_binary(1, 10) {
+                                        connectors1.read().unwrap()[i].0.do_send(
+                                            NetworkClientMessages::PartialEncodedChunk(
+                                                partial_encoded_chunk.clone(),
+                                            ),
+                                        );
+                                    }
+                                }
+                            }
+                        }
                         NetworkRequests::ChunkOnePartResponse { peer_id, header_and_part } => {
                             for (i, peer_info) in key_pairs.iter().enumerate() {
                                 if peer_info.id == *peer_id {

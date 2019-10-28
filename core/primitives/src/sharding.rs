@@ -118,6 +118,15 @@ impl ShardChunkHeader {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
+pub struct PartialEncodedChunk {
+    pub shard_id: u64,
+    pub chunk_hash: ChunkHash,
+    pub header: Option<ShardChunkHeader>,
+    pub parts: Vec<PartialEncodedChunkPart>,
+    pub receipts: Vec<ReceiptProof>,
+}
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
 pub struct ChunkOnePart {
     pub shard_id: u64,
     pub chunk_hash: ChunkHash,
@@ -138,6 +147,13 @@ pub struct ShardProof {
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
 // For each Merkle proof there is a subset of receipts which may be proven.
 pub struct ReceiptProof(pub Vec<Receipt>, pub ShardProof);
+
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
+pub struct PartialEncodedChunkPart {
+    pub part_ord: u64,
+    pub part: Box<[u8]>,
+    pub merkle_proof: MerklePath,
+}
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
 pub struct ShardChunk {
@@ -311,6 +327,31 @@ impl EncodedShardChunk {
 
     pub fn chunk_hash(&self) -> ChunkHash {
         self.header.chunk_hash()
+    }
+
+    pub fn create_partial_encoded_chunk(
+        &self,
+        part_ords: Vec<u64>,
+        include_header: bool,
+        receipts: Vec<ReceiptProof>,
+        merkle_paths: &[MerklePath],
+    ) -> PartialEncodedChunk {
+        let parts = part_ords
+            .iter()
+            .map(|part_ord| PartialEncodedChunkPart {
+                part_ord: *part_ord,
+                part: self.content.parts[*part_ord as usize].clone().unwrap(),
+                merkle_proof: merkle_paths[*part_ord as usize].clone(),
+            })
+            .collect();
+
+        PartialEncodedChunk {
+            shard_id: self.header.inner.shard_id,
+            chunk_hash: self.header.chunk_hash(),
+            header: if include_header { Some(self.header.clone()) } else { None },
+            parts,
+            receipts,
+        }
     }
 
     pub fn create_chunk_one_part(

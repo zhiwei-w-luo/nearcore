@@ -699,6 +699,22 @@ impl Handler<NetworkRequests> for PeerManagerActor {
                 );
                 NetworkResponses::NoResponse
             }
+            NetworkRequests::PartialEncodedChunkRequest { account_id, request } => {
+                self.send_message_to_account(
+                    ctx,
+                    &account_id,
+                    RoutedMessageBody::PartialEncodedChunkRequest(request),
+                );
+                NetworkResponses::NoResponse
+            }
+            NetworkRequests::PartialEncodedChunkMessage { account_id, partial_encoded_chunk } => {
+                self.send_message_to_account(
+                    ctx,
+                    &account_id,
+                    RoutedMessageBody::PartialEncodedChunk(partial_encoded_chunk),
+                );
+                NetworkResponses::NoResponse
+            }
             NetworkRequests::ForwardTx(account_id, tx) => {
                 self.send_message_to_account(ctx, &account_id, RoutedMessageBody::ForwardTx(tx));
                 NetworkResponses::NoResponse

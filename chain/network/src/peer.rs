@@ -292,6 +292,12 @@ impl Peer {
                     NetworkClientMessages::ChunkOnePartRequest(request, peer_id)
                 }
                 RoutedMessageBody::ChunkOnePart(part) => NetworkClientMessages::ChunkOnePart(part),
+                RoutedMessageBody::PartialEncodedChunkRequest(request) => {
+                    NetworkClientMessages::PartialEncodedChunkRequest(request, peer_id)
+                }
+                RoutedMessageBody::PartialEncodedChunk(partial_encoded_chunk) => {
+                    NetworkClientMessages::PartialEncodedChunk(partial_encoded_chunk)
+                }
                 RoutedMessageBody::Ping(_) | RoutedMessageBody::Pong(_) => {
                     error!(target: "network", "Peer receive_client_message received unexpected type");
                     return;

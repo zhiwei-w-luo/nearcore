@@ -400,6 +400,14 @@ impl Handler<NetworkClientMessages> for ClientActor {
                 }
                 NetworkClientResponses::NoResponse
             }
+            NetworkClientMessages::PartialEncodedChunk(partial_encoded_chunk) => {
+                if let Ok(accepted_blocks) =
+                    self.client.process_partial_encoded_chunk(partial_encoded_chunk)
+                {
+                    self.process_accepted_blocks(accepted_blocks);
+                }
+                NetworkClientResponses::NoResponse
+            }
             NetworkClientMessages::AnnounceAccount(announce_accounts) => {
                 let mut filtered_announce_accounts = Vec::new();
 
@@ -714,7 +722,7 @@ impl ClientActor {
                         missing_chunks.clone(),
                         missing_chunks.iter().map(|header| header.chunk_hash()).collect::<Vec<_>>()
                     );
-                    self.client.shards_mgr.request_chunks(missing_chunks, false).unwrap();
+                    self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
                     NetworkClientResponses::NoResponse
                 }
                 _ => {
@@ -1027,7 +1035,7 @@ impl ClientActor {
                             accepted_blocks.write().unwrap().drain(..).collect(),
                         );
                         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-                            self.client.shards_mgr.request_chunks(missing_chunks, false).unwrap();
+                            self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
                         }
 
                         self.client.sync_status =
