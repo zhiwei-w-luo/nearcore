@@ -55,6 +55,10 @@ impl EncodedChunksCache {
         self.encoded_chunks.get(&chunk_hash)
     }
 
+    pub fn remove(&mut self, chunk_hash: &ChunkHash) -> Option<EncodedChunksCacheEntry> {
+        self.encoded_chunks.remove(&chunk_hash)
+    }
+
     pub fn process_partial_encoded_chunk(
         &mut self,
         partial_encoded_chunk: &PartialEncodedChunk,

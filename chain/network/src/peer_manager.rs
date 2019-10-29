@@ -661,50 +661,20 @@ impl Handler<NetworkRequests> for PeerManagerActor {
                 self.announce_account(ctx, announce_account);
                 NetworkResponses::NoResponse
             }
-            NetworkRequests::ChunkPartRequest { account_id, part_request } => {
-                self.send_message_to_account(
-                    ctx,
-                    &account_id,
-                    RoutedMessageBody::ChunkPartRequest(part_request),
-                );
-                NetworkResponses::NoResponse
-            }
-            NetworkRequests::ChunkOnePartRequest { account_id, one_part_request } => {
-                self.send_message_to_account(
-                    ctx,
-                    &account_id,
-                    RoutedMessageBody::ChunkOnePartRequest(one_part_request),
-                );
-                NetworkResponses::NoResponse
-            }
-            NetworkRequests::ChunkOnePartResponse { peer_id, header_and_part } => {
-                if let Some(active_peer) = self.active_peers.get(&peer_id) {
-                    active_peer.addr.do_send(SendMessage {
-                        message: PeerMessage::ChunkOnePart(header_and_part),
-                    });
-                }
-                NetworkResponses::NoResponse
-            }
-            NetworkRequests::ChunkPart { peer_id, part } => {
-                if let Some(active_peer) = self.active_peers.get(&peer_id) {
-                    active_peer.addr.do_send(SendMessage { message: PeerMessage::ChunkPart(part) });
-                }
-                NetworkResponses::NoResponse
-            }
-            NetworkRequests::ChunkOnePartMessage { account_id, header_and_part } => {
-                self.send_message_to_account(
-                    ctx,
-                    &account_id,
-                    RoutedMessageBody::ChunkOnePart(header_and_part),
-                );
-                NetworkResponses::NoResponse
-            }
             NetworkRequests::PartialEncodedChunkRequest { account_id, request } => {
                 self.send_message_to_account(
                     ctx,
                     &account_id,
                     RoutedMessageBody::PartialEncodedChunkRequest(request),
                 );
+                NetworkResponses::NoResponse
+            }
+            NetworkRequests::PartialEncodedChunkResponse { peer_id, partial_encoded_chunk } => {
+                if let Some(active_peer) = self.active_peers.get(&peer_id) {
+                    active_peer.addr.do_send(SendMessage {
+                        message: PeerMessage::PartialEncodedChunk(partial_encoded_chunk),
+                    });
+                }
                 NetworkResponses::NoResponse
             }
             NetworkRequests::PartialEncodedChunkMessage { account_id, partial_encoded_chunk } => {

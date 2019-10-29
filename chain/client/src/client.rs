@@ -17,18 +17,16 @@ use near_chain::{
     BlockApproval, BlockStatus, Chain, ChainGenesis, ChainStoreAccess, ErrorKind, Provenance,
     RuntimeAdapter, Tip,
 };
-use near_chunks::{NetworkAdapter, ProcessChunkOnePartResult, ShardsManager};
+use near_chunks::{NetworkAdapter, ProcessPartialEncodedChunkResult, ShardsManager};
 use near_crypto::Signature;
-use near_network::types::{ChunkPartMsg, PeerId, ReasonForBan};
+use near_network::types::{PeerId, ReasonForBan};
 use near_network::{NetworkClientResponses, NetworkRequests};
 use near_primitives::block::{Block, BlockHeader};
 use near_primitives::errors::RuntimeError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{merklize, MerklePath};
 use near_primitives::receipt::Receipt;
-use near_primitives::sharding::{
-    ChunkOnePart, EncodedShardChunk, PartialEncodedChunk, ShardChunkHeader,
-};
+use near_primitives::sharding::{EncodedShardChunk, PartialEncodedChunk, ShardChunkHeader};
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, BlockIndex, EpochId, ShardId};
 use near_primitives::unwrap_or_return;
@@ -458,63 +456,24 @@ impl Client {
         (unwrapped_accepted_blocks, result)
     }
 
-    pub fn process_chunk_part(&mut self, part: ChunkPartMsg) -> Result<Vec<AcceptedBlock>, Error> {
-        if let Some(block_hash) =
-            self.shards_mgr.process_chunk_part(part, self.chain.mut_store())?
-        {
-            Ok(self.process_blocks_with_missing_chunks(block_hash))
-        } else {
-            Ok(vec![])
-        }
-    }
-
     pub fn process_partial_encoded_chunk(
         &mut self,
-        _partial_encoded_chunk: PartialEncodedChunk,
+        partial_encoded_chunk: PartialEncodedChunk,
     ) -> Result<Vec<AcceptedBlock>, Error> {
-        Ok(vec![])
-    }
+        let process_result = self
+            .shards_mgr
+            .process_partial_encoded_chunk(partial_encoded_chunk.clone(), self.chain.mut_store())?;
 
-    pub fn process_chunk_one_part(
-        &mut self,
-        one_part_msg: ChunkOnePart,
-    ) -> Result<Vec<AcceptedBlock>, Error> {
-        let process_result =
-            self.shards_mgr.process_chunk_one_part(one_part_msg.clone(), self.chain.mut_store())?;
-
-        let has_all_one_parts = match process_result {
-            ProcessChunkOnePartResult::Known => return Ok(vec![]),
-            ProcessChunkOnePartResult::HaveAllPartsAndReceipts => true,
-            ProcessChunkOnePartResult::NeedMoreOnePartsOrReceipts => false,
-        };
-
-        // After processing one part we might need to request more parts or one parts.
-        // If we are missing some of our own one parts, we need to request them no matter what, since
-        //    nightshade data availability relies on it. Otherwise only request parts if this chunk
-        //    builds on the current head.
-        // TODO: if the bp receives the chunk before they receive the prev block, they will
-        //     not collect the parts currently. It will result in chunk not included
-        //     in the next block.
-
-        let prev_block_hash = one_part_msg.header.inner.prev_block_hash;
-        let builds_on_head = self
-            .chain
-            .head()
-            .map(|head| head.last_block_hash == one_part_msg.header.inner.prev_block_hash)
-            .unwrap_or(false);
-        let care_about_shard = self.shards_mgr.cares_about_shard_this_or_next_epoch(
-            self.block_producer.as_ref().map(|x| &x.account_id),
-            &prev_block_hash,
-            one_part_msg.shard_id,
-            true,
-        );
-        if !has_all_one_parts || (care_about_shard && builds_on_head) {
-            self.shards_mgr.request_chunks(vec![one_part_msg.header]).unwrap();
+        match process_result {
+            ProcessPartialEncodedChunkResult::Known => Ok(vec![]),
+            ProcessPartialEncodedChunkResult::HaveAllPartsAndReceipts(prev_block_hash) => {
+                Ok(self.process_blocks_with_missing_chunks(prev_block_hash))
+            }
+            ProcessPartialEncodedChunkResult::NeedMoreOnePartsOrReceipts(chunk_header) => {
+                self.shards_mgr.request_chunks(vec![chunk_header]).unwrap();
+                Ok(vec![])
+            }
         }
-        if has_all_one_parts {
-            return Ok(self.process_blocks_with_missing_chunks(prev_block_hash));
-        }
-        Ok(vec![])
     }
 
     pub fn process_block_header(&mut self, header: &BlockHeader) -> Result<(), near_chain::Error> {

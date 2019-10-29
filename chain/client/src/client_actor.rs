@@ -375,29 +375,12 @@ impl Handler<NetworkClientMessages> for ClientActor {
 
                 NetworkClientResponses::NoResponse
             }
-            NetworkClientMessages::ChunkPartRequest(part_request_msg, peer_id) => {
-                let _ =
-                    self.client.shards_mgr.process_chunk_part_request(part_request_msg, peer_id);
-                NetworkClientResponses::NoResponse
-            }
-            NetworkClientMessages::ChunkOnePartRequest(part_request_msg, peer_id) => {
-                let _ = self.client.shards_mgr.process_chunk_one_part_request(
+            NetworkClientMessages::PartialEncodedChunkRequest(part_request_msg, peer_id) => {
+                let _ = self.client.shards_mgr.process_partial_encoded_chunk_request(
                     part_request_msg,
                     peer_id,
                     self.client.chain.mut_store(),
                 );
-                NetworkClientResponses::NoResponse
-            }
-            NetworkClientMessages::ChunkPart(part_msg) => {
-                if let Ok(accepted_blocks) = self.client.process_chunk_part(part_msg) {
-                    self.process_accepted_blocks(accepted_blocks);
-                }
-                NetworkClientResponses::NoResponse
-            }
-            NetworkClientMessages::ChunkOnePart(one_part_msg) => {
-                if let Ok(accepted_blocks) = self.client.process_chunk_one_part(one_part_msg) {
-                    self.process_accepted_blocks(accepted_blocks);
-                }
                 NetworkClientResponses::NoResponse
             }
             NetworkClientMessages::PartialEncodedChunk(partial_encoded_chunk) => {

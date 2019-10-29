@@ -127,17 +127,6 @@ pub struct PartialEncodedChunk {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
-pub struct ChunkOnePart {
-    pub shard_id: u64,
-    pub chunk_hash: ChunkHash,
-    pub header: ShardChunkHeader,
-    pub part_id: u64,
-    pub part: Box<[u8]>,
-    pub receipt_proofs: Vec<ReceiptProof>,
-    pub merkle_path: MerklePath,
-}
-
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, Eq, PartialEq)]
 pub struct ShardProof {
     pub from_shard_id: ShardId,
     pub to_shard_id: ShardId,
@@ -161,15 +150,6 @@ pub struct ShardChunk {
     pub header: ShardChunkHeader,
     pub transactions: Vec<SignedTransaction>,
     pub receipts: Vec<Receipt>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, BorshSerialize, BorshDeserialize)]
-pub struct ChunkPartMsg {
-    pub shard_id: u64,
-    pub chunk_hash: ChunkHash,
-    pub part_id: u64,
-    pub part: Shard,
-    pub merkle_path: MerklePath,
 }
 
 #[derive(Default, BorshSerialize, BorshDeserialize, Debug, Clone)]
@@ -351,33 +331,6 @@ impl EncodedShardChunk {
             header: if include_header { Some(self.header.clone()) } else { None },
             parts,
             receipts,
-        }
-    }
-
-    pub fn create_chunk_one_part(
-        &self,
-        part_id: u64,
-        receipt_proofs: Vec<ReceiptProof>,
-        merkle_path: MerklePath,
-    ) -> ChunkOnePart {
-        ChunkOnePart {
-            shard_id: self.header.inner.shard_id,
-            chunk_hash: self.header.chunk_hash(),
-            header: self.header.clone(),
-            part_id,
-            part: self.content.parts[part_id as usize].clone().unwrap(),
-            receipt_proofs,
-            merkle_path,
-        }
-    }
-
-    pub fn create_chunk_part_msg(&self, part_id: u64, merkle_path: MerklePath) -> ChunkPartMsg {
-        ChunkPartMsg {
-            shard_id: self.header.inner.shard_id,
-            chunk_hash: self.header.chunk_hash(),
-            part_id,
-            part: self.content.parts[part_id as usize].clone().unwrap(),
-            merkle_path,
         }
     }
 

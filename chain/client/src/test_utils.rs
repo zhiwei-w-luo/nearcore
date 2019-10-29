@@ -261,30 +261,16 @@ pub fn setup_mock_all_validators(
                             my_height_weight.1 =
                                 max(my_height_weight.1, block.header.inner.total_weight);
                         }
-                        NetworkRequests::ChunkPartRequest { account_id, part_request } => {
-                            for (i, name) in validators_clone2.iter().flatten().enumerate() {
-                                if name == account_id {
-                                    if !drop_chunks || !sample_binary(1, 10) {
-                                        connectors1.read().unwrap()[i].0.do_send(
-                                            NetworkClientMessages::ChunkPartRequest(
-                                                part_request.clone(),
-                                                my_key_pair.id.clone(),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        NetworkRequests::ChunkOnePartRequest {
+                        NetworkRequests::PartialEncodedChunkRequest {
                             account_id: their_account_id,
-                            one_part_request,
+                            request,
                         } => {
                             for (i, name) in validators_clone2.iter().flatten().enumerate() {
                                 if name == their_account_id {
                                     if !drop_chunks || !sample_binary(1, 10) {
                                         connectors1.read().unwrap()[i].0.do_send(
-                                            NetworkClientMessages::ChunkOnePartRequest(
-                                                one_part_request.clone(),
+                                            NetworkClientMessages::PartialEncodedChunkRequest(
+                                                request.clone(),
                                                 my_key_pair.id.clone(),
                                             ),
                                         );
@@ -292,13 +278,16 @@ pub fn setup_mock_all_validators(
                                 }
                             }
                         }
-                        NetworkRequests::ChunkOnePartMessage { account_id, header_and_part } => {
-                            for (i, name) in validators_clone2.iter().flatten().enumerate() {
-                                if name == account_id {
+                        NetworkRequests::PartialEncodedChunkResponse {
+                            peer_id,
+                            partial_encoded_chunk,
+                        } => {
+                            for (i, peer_info) in key_pairs.iter().enumerate() {
+                                if peer_info.id == *peer_id {
                                     if !drop_chunks || !sample_binary(1, 10) {
                                         connectors1.read().unwrap()[i].0.do_send(
-                                            NetworkClientMessages::ChunkOnePart(
-                                                header_and_part.clone(),
+                                            NetworkClientMessages::PartialEncodedChunk(
+                                                partial_encoded_chunk.clone(),
                                             ),
                                         );
                                     }
@@ -316,30 +305,6 @@ pub fn setup_mock_all_validators(
                                             NetworkClientMessages::PartialEncodedChunk(
                                                 partial_encoded_chunk.clone(),
                                             ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        NetworkRequests::ChunkOnePartResponse { peer_id, header_and_part } => {
-                            for (i, peer_info) in key_pairs.iter().enumerate() {
-                                if peer_info.id == *peer_id {
-                                    if !drop_chunks || !sample_binary(1, 10) {
-                                        connectors1.read().unwrap()[i].0.do_send(
-                                            NetworkClientMessages::ChunkOnePart(
-                                                header_and_part.clone(),
-                                            ),
-                                        );
-                                    }
-                                }
-                            }
-                        }
-                        NetworkRequests::ChunkPart { peer_id, part } => {
-                            for (i, peer_info) in key_pairs.iter().enumerate() {
-                                if peer_info.id == *peer_id {
-                                    if !drop_chunks || !sample_binary(1, 10) {
-                                        connectors1.read().unwrap()[i].0.do_send(
-                                            NetworkClientMessages::ChunkPart(part.clone()),
                                         );
                                     }
                                 }

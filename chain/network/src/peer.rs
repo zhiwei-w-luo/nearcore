@@ -285,13 +285,6 @@ impl Peer {
                 RoutedMessageBody::StateRequest(shard_id, hash, need_header, parts_ranges) => {
                     NetworkClientMessages::StateRequest(shard_id, hash, need_header, parts_ranges)
                 }
-                RoutedMessageBody::ChunkPartRequest(request) => {
-                    NetworkClientMessages::ChunkPartRequest(request, peer_id)
-                }
-                RoutedMessageBody::ChunkOnePartRequest(request) => {
-                    NetworkClientMessages::ChunkOnePartRequest(request, peer_id)
-                }
-                RoutedMessageBody::ChunkOnePart(part) => NetworkClientMessages::ChunkOnePart(part),
                 RoutedMessageBody::PartialEncodedChunkRequest(request) => {
                     NetworkClientMessages::PartialEncodedChunkRequest(request, peer_id)
                 }
@@ -303,14 +296,9 @@ impl Peer {
                     return;
                 }
             },
-            PeerMessage::ChunkPartRequest(request) => {
-                NetworkClientMessages::ChunkPartRequest(request, peer_id)
+            PeerMessage::PartialEncodedChunk(partial_encoded_chunk) => {
+                NetworkClientMessages::PartialEncodedChunk(partial_encoded_chunk)
             }
-            PeerMessage::ChunkOnePartRequest(request) => {
-                NetworkClientMessages::ChunkOnePartRequest(request, peer_id)
-            }
-            PeerMessage::ChunkPart(part) => NetworkClientMessages::ChunkPart(part),
-            PeerMessage::ChunkOnePart(one_part) => NetworkClientMessages::ChunkOnePart(one_part),
             PeerMessage::Handshake(_)
             | PeerMessage::HandshakeFailure(_, _)
             | PeerMessage::PeersRequest

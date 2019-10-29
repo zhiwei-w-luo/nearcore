@@ -1605,7 +1605,8 @@ impl<'a> ChainUpdate<'a> {
         let mut missing = vec![];
         let height = block.header.inner.height;
         for (shard_id, chunk_header) in block.chunks.iter().enumerate() {
-            let shard_id = shard_id as ShardId;
+            // TODO: finish
+            /*let shard_id = shard_id as ShardId;
             if chunk_header.height_included == height {
                 let chunk_hash = chunk_header.chunk_hash();
 
@@ -1626,7 +1627,7 @@ impl<'a> ChainUpdate<'a> {
                         missing.push(chunk_header.clone());
                     }
                 }
-            }
+            }*/
         }
         if !missing.is_empty() {
             return Err(ErrorKind::ChunksMissing(missing).into());
@@ -1640,7 +1641,8 @@ impl<'a> ChainUpdate<'a> {
 
         for chunk_header in block.chunks.iter() {
             if chunk_header.height_included == height {
-                let one_part = self.chain_store_update.get_chunk_one_part(chunk_header).unwrap();
+                // TODO: finish
+                /*let one_part = self.chain_store_update.get_chunk_one_part(chunk_header).unwrap();
                 for receipt_proof in one_part.receipt_proofs.iter() {
                     let ReceiptProof(_, shard_proof) = receipt_proof;
                     let ShardProof { from_shard_id: _, to_shard_id, proof: _ } = shard_proof;
@@ -1648,7 +1650,7 @@ impl<'a> ChainUpdate<'a> {
                         .entry(*to_shard_id)
                         .or_insert_with(Vec::new)
                         .push(receipt_proof.clone());
-                }
+                }*/
             }
         }
 

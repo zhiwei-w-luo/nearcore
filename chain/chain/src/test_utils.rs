@@ -868,17 +868,17 @@ pub fn display_chain(me: &Option<AccountId>, chain: &mut Chain, tail: bool) {
                             chunk.transactions.len(),
                             chunk.receipts.len()
                         );
-                    } else if let Ok(chunk_one_part) = chain_store.get_chunk_one_part(&chunk_header)
-                    {
-                        debug!(
-                            "    {: >3} {} | {} | {: >10} | part = {}",
-                            chunk_header.inner.height_created,
-                            format_hash(chunk_header.chunk_hash().0),
-                            chunk_header.inner.shard_id,
-                            chunk_producer,
-                            chunk_one_part.part_id
-                        );
-                    }
+                    } /*else if let Ok(chunk_one_part) = chain_store.get_chunk_one_part(&chunk_header)
+                      { // TODO: finish
+                          debug!(
+                              "    {: >3} {} | {} | {: >10} | part = {}",
+                              chunk_header.inner.height_created,
+                              format_hash(chunk_header.chunk_hash().0),
+                              chunk_header.inner.shard_id,
+                              chunk_producer,
+                              chunk_one_part.part_id
+                          );
+                      }*/
                 }
             }
         }

@@ -10,17 +10,15 @@ use log::debug;
 
 use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::Receipt;
-use near_primitives::sharding::{
-    ChunkHash, ChunkOnePart, ReceiptProof, ShardChunk, ShardChunkHeader,
-};
+use near_primitives::sharding::{ChunkHash, ReceiptProof, ShardChunk, ShardChunkHeader};
 use near_primitives::transaction::ExecutionOutcome;
 use near_primitives::types::{BlockIndex, ChunkExtra, ShardId};
 use near_primitives::utils::{index_to_bytes, to_timestamp};
 use near_store::{
     read_with_cache, Store, StoreUpdate, WrappedTrieChanges, COL_BLOCK, COL_BLOCKS_TO_CATCHUP,
     COL_BLOCK_HEADER, COL_BLOCK_INDEX, COL_BLOCK_MISC, COL_CHALLENGED_BLOCKS, COL_CHUNKS,
-    COL_CHUNK_EXTRA, COL_CHUNK_ONE_PARTS, COL_INCOMING_RECEIPTS, COL_OUTGOING_RECEIPTS,
-    COL_STATE_DL_INFOS, COL_TRANSACTION_RESULT,
+    COL_CHUNK_EXTRA, COL_INCOMING_RECEIPTS, COL_OUTGOING_RECEIPTS, COL_STATE_DL_INFOS,
+    COL_TRANSACTION_RESULT,
 };
 
 use crate::byzantine_assert;
@@ -191,8 +189,6 @@ pub trait ChainStoreAccess {
             }
         }
     }
-    /// Get chunk one part.
-    fn get_chunk_one_part(&mut self, header: &ShardChunkHeader) -> Result<&ChunkOnePart, Error>;
     /// Does this full block exist?
     fn block_exists(&self, h: &CryptoHash) -> Result<bool, Error>;
     /// Get previous header.
@@ -267,8 +263,6 @@ pub struct ChainStore {
     blocks: SizedCache<Vec<u8>, Block>,
     /// Cache with chunks
     chunks: SizedCache<Vec<u8>, ShardChunk>,
-    /// Cache with chunk one parts
-    chunk_one_parts: SizedCache<Vec<u8>, ChunkOnePart>,
     /// Cache with chunk extra.
     chunk_extras: SizedCache<Vec<u8>, ChunkExtra>,
     // Cache with index to hash on the main chain.
@@ -298,7 +292,6 @@ impl ChainStore {
             headers: SizedCache::with_size(CACHE_SIZE),
             header_history: HeaderList::new(),
             chunks: SizedCache::with_size(CHUNK_CACHE_SIZE),
-            chunk_one_parts: SizedCache::with_size(CHUNK_CACHE_SIZE),
             chunk_extras: SizedCache::with_size(CACHE_SIZE),
             // block_index: SizedCache::with_size(CACHE_SIZE),
             outgoing_receipts: SizedCache::with_size(CACHE_SIZE),
@@ -466,19 +459,6 @@ impl ChainStoreAccess for ChainStore {
         }
     }
 
-    /// Get Chunk one part.
-    fn get_chunk_one_part(&mut self, header: &ShardChunkHeader) -> Result<&ChunkOnePart, Error> {
-        match read_with_cache(
-            &*self.store,
-            COL_CHUNK_ONE_PARTS,
-            &mut self.chunk_one_parts,
-            header.chunk_hash().as_ref(),
-        ) {
-            Ok(Some(chunk_one_part)) => Ok(chunk_one_part),
-            _ => Err(ErrorKind::ChunksMissing(vec![header.clone()]).into()),
-        }
-    }
-
     /// Does this full block exist?
     fn block_exists(&self, h: &CryptoHash) -> Result<bool, Error> {
         self.store.exists(COL_BLOCK, h.as_ref()).map_err(|e| e.into())
@@ -616,7 +596,6 @@ pub struct ChainStoreUpdate<'a, T> {
     headers: HashMap<CryptoHash, BlockHeader>,
     chunk_extras: HashMap<(CryptoHash, ShardId), ChunkExtra>,
     chunks: HashMap<ChunkHash, ShardChunk>,
-    chunk_one_parts: HashMap<ChunkHash, ChunkOnePart>,
     block_index: HashMap<BlockIndex, Option<CryptoHash>>,
     outgoing_receipts: HashMap<(CryptoHash, ShardId), Vec<Receipt>>,
     incoming_receipts: HashMap<(CryptoHash, ShardId), Vec<ReceiptProof>>,
@@ -647,7 +626,6 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
             block_index: HashMap::default(),
             chunk_extras: HashMap::default(),
             chunks: HashMap::default(),
-            chunk_one_parts: HashMap::default(),
             outgoing_receipts: HashMap::default(),
             incoming_receipts: HashMap::default(),
             transaction_results: HashMap::default(),
@@ -848,14 +826,6 @@ impl<'a, T: ChainStoreAccess> ChainStoreAccess for ChainStoreUpdate<'a, T> {
         }
     }
 
-    fn get_chunk_one_part(&mut self, header: &ShardChunkHeader) -> Result<&ChunkOnePart, Error> {
-        if let Some(one_part) = self.chunk_one_parts.get(&header.hash) {
-            Ok(one_part)
-        } else {
-            self.chain_store.get_chunk_one_part(header)
-        }
-    }
-
     fn get_blocks_to_catchup(&self, prev_hash: &CryptoHash) -> Result<Vec<CryptoHash>, Error> {
         // Make sure we never request a block to catchup after altering the data structure
         assert_eq!(self.add_blocks_to_catchup.len(), 0);
@@ -991,10 +961,6 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
         self.chunks.insert(chunk_hash.clone(), chunk);
     }
 
-    pub fn save_chunk_one_part(&mut self, chunk_hash: &ChunkHash, one_part: ChunkOnePart) {
-        self.chunk_one_parts.insert(chunk_hash.clone(), one_part);
-    }
-
     pub fn delete_block(&mut self, hash: &CryptoHash) {
         self.deleted_blocks.insert(*hash);
     }
@@ -1123,11 +1089,6 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
         for (chunk_hash, chunk) in self.chunks.drain() {
             store_update
                 .set_ser(COL_CHUNKS, chunk_hash.as_ref(), &chunk)
-                .map_err::<Error, _>(|e| e.into())?;
-        }
-        for (chunk_hash, chunk_one_part) in self.chunk_one_parts.drain() {
-            store_update
-                .set_ser(COL_CHUNK_ONE_PARTS, chunk_hash.as_ref(), &chunk_one_part)
                 .map_err::<Error, _>(|e| e.into())?;
         }
         for (height, hash) in self.block_index.drain() {

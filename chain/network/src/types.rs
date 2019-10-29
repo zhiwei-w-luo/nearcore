@@ -9,8 +9,7 @@ use near_chain::{Block, BlockApproval, BlockHeader, Weight};
 use near_crypto::{PublicKey, SecretKey, Signature};
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
-pub use near_primitives::sharding::ChunkPartMsg;
-use near_primitives::sharding::{ChunkHash, ChunkOnePart, PartialEncodedChunk};
+use near_primitives::sharding::{ChunkHash, PartialEncodedChunk};
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{AccountId, BlockIndex, EpochId, Range, ShardId};
 use near_primitives::utils::{from_timestamp, to_timestamp};
@@ -290,9 +289,6 @@ pub enum RoutedMessageBody {
     TxStatusRequest(AccountId, CryptoHash),
     TxStatusResponse(FinalExecutionOutcomeView),
     StateRequest(ShardId, CryptoHash, bool, Vec<Range>),
-    ChunkPartRequest(ChunkPartRequestMsg),
-    ChunkOnePartRequest(ChunkOnePartRequestMsg),
-    ChunkOnePart(ChunkOnePart),
     PartialEncodedChunkRequest(PartialEncodedChunkRequestMsg),
     PartialEncodedChunk(PartialEncodedChunk),
     /// Ping/Pong used for testing networking and routing.
@@ -457,10 +453,7 @@ pub enum PeerMessage {
     StateResponse(StateResponseInfo),
     Routed(RoutedMessage),
 
-    ChunkPartRequest(ChunkPartRequestMsg),
-    ChunkOnePartRequest(ChunkOnePartRequestMsg),
-    ChunkPart(ChunkPartMsg),
-    ChunkOnePart(ChunkOnePart),
+    PartialEncodedChunk(PartialEncodedChunk),
 
     /// Gracefully disconnect from other peer.
     Disconnect,
@@ -491,9 +484,6 @@ impl fmt::Display for PeerMessage {
                     f.write_str("Transaction status response")
                 }
                 RoutedMessageBody::StateRequest(_, _, _, _) => f.write_str("StateResponse"),
-                RoutedMessageBody::ChunkPartRequest(_) => f.write_str("ChunkPartRequest"),
-                RoutedMessageBody::ChunkOnePartRequest(_) => f.write_str("ChunkOnePartRequest"),
-                RoutedMessageBody::ChunkOnePart(_) => f.write_str("ChunkOnePart"),
                 RoutedMessageBody::PartialEncodedChunkRequest(_) => {
                     f.write_str("PartialEncodedChunkRequest")
                 }
@@ -501,10 +491,7 @@ impl fmt::Display for PeerMessage {
                 RoutedMessageBody::Ping(_) => f.write_str("Ping"),
                 RoutedMessageBody::Pong(_) => f.write_str("Pong"),
             },
-            PeerMessage::ChunkPartRequest(_) => f.write_str("ChunkPartRequest"),
-            PeerMessage::ChunkOnePartRequest(_) => f.write_str("ChunkOnePartRequest"),
-            PeerMessage::ChunkPart(_) => f.write_str("ChunkPart"),
-            PeerMessage::ChunkOnePart(_) => f.write_str("ChunkOnePart"),
+            PeerMessage::PartialEncodedChunk(_) => f.write_str("PartialEncodedChunk"),
             PeerMessage::Disconnect => f.write_str("Disconnect"),
         }
     }
@@ -753,40 +740,20 @@ pub enum NetworkRequests {
     /// Announce account
     AnnounceAccount(AnnounceAccount),
 
-    /// Request chunk part
-    ChunkPartRequest {
-        account_id: AccountId,
-        part_request: ChunkPartRequestMsg,
-    },
-    /// Request chunk part and receipts
-    ChunkOnePartRequest {
-        account_id: AccountId,
-        one_part_request: ChunkOnePartRequestMsg,
-    },
-    /// Response to a peer with chunk part and receipts.
-    ChunkOnePartResponse {
-        peer_id: PeerId,
-        header_and_part: ChunkOnePart,
-    },
-    /// A chunk header and one part for another validator.
-    ChunkOnePartMessage {
-        account_id: AccountId,
-        header_and_part: ChunkOnePart,
-    },
     /// Request chunk parts and/or receipts
     PartialEncodedChunkRequest {
         account_id: AccountId,
         request: PartialEncodedChunkRequestMsg,
     },
     /// Information about chunk such as its header, some subset of parts and/or incoming receipts
+    PartialEncodedChunkResponse {
+        peer_id: PeerId,
+        partial_encoded_chunk: PartialEncodedChunk,
+    },
+    /// Information about chunk such as its header, some subset of parts and/or incoming receipts
     PartialEncodedChunkMessage {
         account_id: AccountId,
         partial_encoded_chunk: PartialEncodedChunk,
-    },
-    /// A chunk part
-    ChunkPart {
-        peer_id: PeerId,
-        part: ChunkPartMsg,
     },
 
     /// Valid transaction but since we are not validators we send this transaction to current validators.
@@ -899,14 +866,6 @@ pub enum NetworkClientMessages {
     /// Account announcements that needs to be validated before being processed.
     AnnounceAccount(Vec<AnnounceAccount>),
 
-    /// Request chunk part.
-    ChunkPartRequest(ChunkPartRequestMsg, PeerId),
-    /// Request chunk part.
-    ChunkOnePartRequest(ChunkOnePartRequestMsg, PeerId),
-    /// A chunk part.
-    ChunkPart(ChunkPartMsg),
-    /// A chunk header and one part.
-    ChunkOnePart(ChunkOnePart),
     /// Request chunk parts and/or receipts.
     PartialEncodedChunkRequest(PartialEncodedChunkRequestMsg, PeerId),
     /// Information about chunk such as its header, some subset of parts and/or incoming receipts
