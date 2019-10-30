@@ -7,6 +7,7 @@ use chrono::{DateTime, Utc};
 use near_chain::types::ShardStateSyncResponse;
 use near_chain::{Block, BlockApproval, BlockHeader, Weight};
 use near_crypto::{PublicKey, SecretKey, Signature};
+use near_primitives::challenge::Challenge;
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
 use near_primitives::sharding::{ChunkHash, PartialEncodedChunk};
@@ -436,6 +437,8 @@ pub enum PeerMessage {
     LastEdge(Edge),
     /// Contains accounts and edge information.
     Sync(SyncData),
+    RequestUpdateNonce(EdgeInfo),
+    ResponseUpdateNonce(Edge),
 
     PeersRequest,
     PeersResponse(Vec<PeerInfo>),
@@ -457,6 +460,8 @@ pub enum PeerMessage {
 
     /// Gracefully disconnect from other peer.
     Disconnect,
+
+    Challenge(Challenge),
 }
 
 impl fmt::Display for PeerMessage {
@@ -465,6 +470,8 @@ impl fmt::Display for PeerMessage {
             PeerMessage::Handshake(_) => f.write_str("Handshake"),
             PeerMessage::HandshakeFailure(_, _) => f.write_str("HandshakeFailure"),
             PeerMessage::Sync(_) => f.write_str("Sync"),
+            PeerMessage::RequestUpdateNonce(_) => f.write_str("RequestUpdateNonce"),
+            PeerMessage::ResponseUpdateNonce(_) => f.write_str("ResponseUpdateNonce"),
             PeerMessage::LastEdge(_) => f.write_str("LastEdge"),
             PeerMessage::PeersRequest => f.write_str("PeersRequest"),
             PeerMessage::PeersResponse(_) => f.write_str("PeersResponse"),
@@ -493,6 +500,7 @@ impl fmt::Display for PeerMessage {
             },
             PeerMessage::PartialEncodedChunk(_) => f.write_str("PartialEncodedChunk"),
             PeerMessage::Disconnect => f.write_str("Disconnect"),
+            PeerMessage::Challenge(_) => f.write_str("Challenge"),
         }
     }
 }
@@ -770,16 +778,23 @@ pub enum NetworkRequests {
         sync_data: SyncData,
     },
 
-    // Start ping to `PeerId` with `nonce`.
+    RequestUpdateNonce(PeerId, EdgeInfo),
+    ResponseUpdateNonce(Edge),
+
+    /// Start ping to `PeerId` with `nonce`.
     PingTo(usize, PeerId),
-    // Fetch all received ping and pong so far.
+    /// Fetch all received ping and pong so far.
     FetchPingPongInfo,
+
+    /// A challenge to invalidate a block.
+    Challenge(Challenge),
 }
 
 /// Messages from PeerManager to Peer
 #[derive(Message)]
 pub enum PeerManagerRequest {
     BanPeer(ReasonForBan),
+    UnregisterPeer,
 }
 
 /// Combines peer address info and chain information.
@@ -809,6 +824,7 @@ pub enum NetworkResponses {
     RoutingTableInfo(RoutingTableInfo),
     PingPongInfo { pings: HashMap<usize, Ping>, pongs: HashMap<usize, Pong> },
     BanPeer(ReasonForBan),
+    EdgeUpdate(Edge),
 }
 
 impl<A, M> MessageResponse<A, M> for NetworkResponses
@@ -870,6 +886,9 @@ pub enum NetworkClientMessages {
     PartialEncodedChunkRequest(PartialEncodedChunkRequestMsg, PeerId),
     /// Information about chunk such as its header, some subset of parts and/or incoming receipts
     PartialEncodedChunk(PartialEncodedChunk),
+
+    /// A challenge to invalidate the block.
+    Challenge(Challenge),
 }
 
 // TODO(#1313): Use Box

@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 use actix::Recipient;
 use log::{debug, error};
 
-use near_chain::types::validate_chunk_proofs;
+use near_chain::validate::validate_chunk_proofs;
 use near_chain::{
     byzantine_assert, collect_receipts, ChainStore, ErrorKind, RuntimeAdapter, ValidTransaction,
 };
@@ -532,7 +532,7 @@ impl ShardsManager {
                     .get(&chunk_hash)
                     .map(std::clone::Clone::clone)
                     .expect("Present if add_part returns Ok");
-                self.process_encoded_chunk(&chunk, merkle_paths, chain_store)
+                self.process_encoded_chunk(chunk, merkle_paths, chain_store)
             }
             ChunkStatus::Incomplete => Ok(None),
             ChunkStatus::Invalid => {
@@ -544,7 +544,7 @@ impl ShardsManager {
                     self.merkle_paths.remove(&(chunk_hash.clone(), i as u64));
                 }
                 self.encoded_chunks.remove(&chunk_hash);
-                Ok(None)
+                Err(Error::InvalidChunk)
             }
         }*/
 
@@ -757,7 +757,7 @@ impl ShardsManager {
 
     pub fn process_encoded_chunk(
         &mut self,
-        chunk: &EncodedShardChunk,
+        chunk: EncodedShardChunk,
         _chain_store: &mut ChainStore,
     ) -> Result<Option<CryptoHash>, Error> {
         let chunk_hash = chunk.header.chunk_hash();
@@ -778,11 +778,12 @@ impl ShardsManager {
             return Ok(Some(chunk.header.inner.prev_block_hash));
         } else {
             // Can't decode chunk or has invalid proofs, ignore it
-            error!(target: "chunks", "Reconstructed but failed to decoded chunk {}", chunk_hash.0);
-            // TODO: mark chunk invalid.
+            error!(target: "chunks", "Reconstructed, but failed to decoded chunk {}, I'm {:?}", chunk_hash.0, self.me);
+            store_update.save_invalid_chunk(chunk);
+            store_update.commit()?;
             self.encoded_chunks.remove(&chunk_hash);
             self.requested_partial_encoded_chunks.remove(&chunk_hash);
-            return Ok(None);
+            return Err(Error::InvalidChunk);
         }
     }
 
@@ -792,7 +793,7 @@ impl ShardsManager {
         merkle_paths: Vec<MerklePath>,
         outgoing_receipts: Vec<Receipt>,
         chain_store: &mut ChainStore,
-    ) {
+    ) -> Result<(), Error> {
         // TODO: if the number of validators exceeds the number of parts, this logic must be changed
         let prev_block_hash = encoded_chunk.header.inner.prev_block_hash;
         let shard_id = encoded_chunk.header.inner.shard_id;
@@ -870,6 +871,10 @@ impl ShardsManager {
                 .collect(),
         };
 
+        // Save this chunk into encoded_chunks.
+        self.encoded_chunks.insert(chunk_hash.clone(), cache_entry);
+
+        // Process encoded chunk to add to the store.
         // TODO: process encoded chunk
         /*self.process_encoded_chunk(
             &encoded_chunk,
@@ -879,7 +884,8 @@ impl ShardsManager {
                 })
                 .collect(),
             chain_store,
-        )
-        .expect("Failed to process just created chunk");*/
+        )?;*/
+
+        Ok(())
     }
 }
