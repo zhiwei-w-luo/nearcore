@@ -11,7 +11,7 @@ use log::debug;
 use near_primitives::hash::CryptoHash;
 use near_primitives::receipt::Receipt;
 use near_primitives::sharding::{
-    ChunkHash, EncodedShardChunk, ReceiptProof, ShardChunk, ShardChunkHeader,
+    ChunkHash, EncodedShardChunk, PartialEncodedChunk, ReceiptProof, ShardChunk, ShardChunkHeader,
 };
 use near_primitives::transaction::ExecutionOutcome;
 use near_primitives::types::{BlockExtra, BlockIndex, ChunkExtra, ShardId};
@@ -20,7 +20,7 @@ use near_store::{
     read_with_cache, Store, StoreUpdate, WrappedTrieChanges, COL_BLOCK, COL_BLOCKS_TO_CATCHUP,
     COL_BLOCK_EXTRA, COL_BLOCK_HEADER, COL_BLOCK_INDEX, COL_BLOCK_MISC, COL_BLOCK_PER_HEIGHT,
     COL_CHALLENGED_BLOCKS, COL_CHUNKS, COL_CHUNK_EXTRA, COL_INCOMING_RECEIPTS, COL_INVALID_CHUNKS,
-    COL_OUTGOING_RECEIPTS, COL_STATE_DL_INFOS, COL_TRANSACTION_RESULT,
+    COL_OUTGOING_RECEIPTS, COL_PARTIAL_CHUNKS, COL_STATE_DL_INFOS, COL_TRANSACTION_RESULT,
 };
 
 use crate::byzantine_assert;
@@ -166,6 +166,8 @@ pub trait ChainStoreAccess {
     fn get_block(&mut self, h: &CryptoHash) -> Result<&Block, Error>;
     /// Get full chunk.
     fn get_chunk(&mut self, chunk_hash: &ChunkHash) -> Result<&ShardChunk, Error>;
+    /// Get partial chunk.
+    fn get_partial_chunk(&mut self, chunk_hash: &ChunkHash) -> Result<&PartialEncodedChunk, Error>;
     /// Get full chunk from header, with possible error that contains the header for further retreival.
     fn get_chunk_clone_from_header(
         &mut self,
@@ -276,6 +278,8 @@ pub struct ChainStore {
     blocks: SizedCache<Vec<u8>, Block>,
     /// Cache with chunks
     chunks: SizedCache<Vec<u8>, ShardChunk>,
+    /// Cache with partial chunks
+    partial_chunks: SizedCache<Vec<u8>, PartialEncodedChunk>,
     /// Cache with block extra.
     block_extras: SizedCache<Vec<u8>, BlockExtra>,
     /// Cache with chunk extra.
@@ -311,6 +315,7 @@ impl ChainStore {
             headers: SizedCache::with_size(CACHE_SIZE),
             header_history: HeaderList::new(),
             chunks: SizedCache::with_size(CHUNK_CACHE_SIZE),
+            partial_chunks: SizedCache::with_size(CHUNK_CACHE_SIZE),
             block_extras: SizedCache::with_size(CACHE_SIZE),
             chunk_extras: SizedCache::with_size(CACHE_SIZE),
             // block_index: SizedCache::with_size(CACHE_SIZE),
@@ -476,6 +481,19 @@ impl ChainStoreAccess for ChainStore {
     /// Get full chunk.
     fn get_chunk(&mut self, chunk_hash: &ChunkHash) -> Result<&ShardChunk, Error> {
         match read_with_cache(&*self.store, COL_CHUNKS, &mut self.chunks, chunk_hash.as_ref()) {
+            Ok(Some(shard_chunk)) => Ok(shard_chunk),
+            _ => Err(ErrorKind::ChunkMissing(chunk_hash.clone()).into()),
+        }
+    }
+
+    /// Get partial chunk.
+    fn get_partial_chunk(&mut self, chunk_hash: &ChunkHash) -> Result<&PartialEncodedChunk, Error> {
+        match read_with_cache(
+            &*self.store,
+            COL_PARTIAL_CHUNKS,
+            &mut self.partial_chunks,
+            chunk_hash.as_ref(),
+        ) {
             Ok(Some(shard_chunk)) => Ok(shard_chunk),
             _ => Err(ErrorKind::ChunkMissing(chunk_hash.clone()).into()),
         }
@@ -657,6 +675,7 @@ pub struct ChainStoreUpdate<'a, T> {
     block_extras: HashMap<CryptoHash, BlockExtra>,
     chunk_extras: HashMap<(CryptoHash, ShardId), ChunkExtra>,
     chunks: HashMap<ChunkHash, ShardChunk>,
+    partial_chunks: HashMap<ChunkHash, PartialEncodedChunk>,
     block_index: HashMap<BlockIndex, Option<CryptoHash>>,
     outgoing_receipts: HashMap<(CryptoHash, ShardId), Vec<Receipt>>,
     incoming_receipts: HashMap<(CryptoHash, ShardId), Vec<ReceiptProof>>,
@@ -689,6 +708,7 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
             block_extras: HashMap::default(),
             chunk_extras: HashMap::default(),
             chunks: HashMap::default(),
+            partial_chunks: HashMap::default(),
             outgoing_receipts: HashMap::default(),
             incoming_receipts: HashMap::default(),
             transaction_results: HashMap::default(),
@@ -891,6 +911,14 @@ impl<'a, T: ChainStoreAccess> ChainStoreAccess for ChainStoreUpdate<'a, T> {
         }
     }
 
+    fn get_partial_chunk(&mut self, chunk_hash: &ChunkHash) -> Result<&PartialEncodedChunk, Error> {
+        if let Some(partial_chunk) = self.partial_chunks.get(chunk_hash) {
+            Ok(partial_chunk)
+        } else {
+            self.chain_store.get_partial_chunk(chunk_hash)
+        }
+    }
+
     fn get_chunk_clone_from_header(
         &mut self,
         header: &ShardChunkHeader,
@@ -1053,6 +1081,14 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
         self.chunks.insert(chunk_hash.clone(), chunk);
     }
 
+    pub fn save_partial_chunk(
+        &mut self,
+        chunk_hash: &ChunkHash,
+        partial_chunk: PartialEncodedChunk,
+    ) {
+        self.partial_chunks.insert(chunk_hash.clone(), partial_chunk);
+    }
+
     pub fn delete_block(&mut self, hash: &CryptoHash) {
         self.deleted_blocks.insert(*hash);
     }
@@ -1195,6 +1231,11 @@ impl<'a, T: ChainStoreAccess> ChainStoreUpdate<'a, T> {
         for (chunk_hash, chunk) in self.chunks.drain() {
             store_update
                 .set_ser(COL_CHUNKS, chunk_hash.as_ref(), &chunk)
+                .map_err::<Error, _>(|e| e.into())?;
+        }
+        for (chunk_hash, partial_chunk) in self.partial_chunks.drain() {
+            store_update
+                .set_ser(COL_PARTIAL_CHUNKS, chunk_hash.as_ref(), &partial_chunk)
                 .map_err::<Error, _>(|e| e.into())?;
         }
         for (height, hash) in self.block_index.drain() {

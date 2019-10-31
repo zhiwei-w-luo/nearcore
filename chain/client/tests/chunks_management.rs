@@ -8,7 +8,7 @@ use futures::{future, Future};
 use near_chain::ChainGenesis;
 use near_client::test_utils::{setup_mock_all_validators, TestEnv};
 use near_client::{ClientActor, GetBlock, ViewClientActor};
-use near_network::types::{ChunkOnePartRequestMsg, PeerId};
+use near_network::types::{PartialEncodedChunkRequestMsg, PeerId};
 use near_network::{NetworkClientMessages, NetworkRequests, NetworkResponses, PeerInfo};
 use near_primitives::block::BlockHeader;
 use near_primitives::hash::CryptoHash;
@@ -41,7 +41,6 @@ fn chunks_produced_and_distributed_one_val_per_shard() {
 /// Confirms that the blocks form a chain (which implies the chunks are distributed).
 /// Confirms that the number of messages transmitting the chunks matches the expected number.
 fn chunks_produced_and_distributed_common(validator_groups: u64) {
-    let validators_per_shard = 4 / validator_groups;
     init_integration_logger();
     System::run(move || {
         let connectors: Arc<RwLock<Vec<(Addr<ClientActor>, Addr<ViewClientActor>)>>> =
@@ -63,9 +62,8 @@ fn chunks_produced_and_distributed_common(validator_groups: u64) {
         let key_pairs =
             vec![PeerInfo::random(), PeerInfo::random(), PeerInfo::random(), PeerInfo::random()];
 
-        let mut one_part_msgs = 0;
-        let mut part_msgs = 0;
-        let mut part_request_msgs = 0;
+        let mut partial_chunk_msgs = 0;
+        let mut partial_chunk_request_msgs = 0;
 
         let (_, conn) = setup_mock_all_validators(
             validators.clone(),
@@ -102,28 +100,25 @@ fn chunks_produced_and_distributed_common(validator_groups: u64) {
                         if block.header.inner.height >= 6 {
                             println!("PREV BLOCK HASH: {}", block.header.inner.prev_hash);
                             println!(
-                                "STATS: one_parts: {} part_requests: {} parts: {}",
-                                one_part_msgs, part_request_msgs, part_msgs
+                                "STATS: responses: {} requests: {}",
+                                partial_chunk_msgs, partial_chunk_request_msgs
                             );
-
-                            // Because there is no response, we are resend requests for parts multiple times.
-                            assert!(
-                                part_request_msgs >= one_part_msgs * (validators_per_shard - 1)
-                            );
-                            assert!(part_msgs >= one_part_msgs * (validators_per_shard - 1));
 
                             System::current().stop();
                         }
                     }
-                    NetworkRequests::ChunkOnePartMessage { account_id: _, header_and_part: _ }
-                    | NetworkRequests::ChunkOnePartResponse { peer_id: _, header_and_part: _ } => {
-                        one_part_msgs += 1;
+                    NetworkRequests::PartialEncodedChunkMessage {
+                        account_id: _,
+                        partial_encoded_chunk: _,
                     }
-                    NetworkRequests::ChunkPartRequest { account_id: _, part_request: _ } => {
-                        part_request_msgs += 1;
+                    | NetworkRequests::PartialEncodedChunkResponse {
+                        peer_id: _,
+                        partial_encoded_chunk: _,
+                    } => {
+                        partial_chunk_msgs += 1;
                     }
-                    NetworkRequests::ChunkPart { peer_id: _, part: _ } => {
-                        part_msgs += 1;
+                    NetworkRequests::PartialEncodedChunkRequest { account_id: _, request: _ } => {
+                        partial_chunk_request_msgs += 1;
                     }
                     _ => {}
                 };
@@ -161,26 +156,31 @@ fn test_request_chunk_restart() {
         env.network_adapters[0].pop();
     }
     let block1 = env.clients[0].chain.get_block_by_height(3).unwrap().clone();
-    let request = ChunkOnePartRequestMsg {
-        shard_id: 0,
+    let request = PartialEncodedChunkRequestMsg {
         chunk_hash: block1.chunks[0].chunk_hash(),
-        height: block1.header.inner.height,
-        part_id: 0,
+        part_ords: vec![0],
         tracking_shards: HashSet::default(),
     };
     let client = &mut env.clients[0];
-    client
-        .shards_mgr
-        .process_chunk_one_part_request(request.clone(), PeerId::random(), client.chain.mut_store())
-        .unwrap();
+    client.shards_mgr.process_partial_encoded_chunk_request(
+        request.clone(),
+        PeerId::random(),
+        client.chain.mut_store(),
+    );
     assert!(env.network_adapters[0].pop().is_some());
 
     env.restart(0);
     let client = &mut env.clients[0];
-    client
-        .shards_mgr
-        .process_chunk_one_part_request(request, PeerId::random(), client.chain.mut_store())
-        .unwrap();
-    // TODO(1434): should be some() with the same chunk.
-    assert!(env.network_adapters[0].pop().is_none());
+    client.shards_mgr.process_partial_encoded_chunk_request(
+        request,
+        PeerId::random(),
+        client.chain.mut_store(),
+    );
+    let response = env.network_adapters[0].pop().unwrap();
+    if let NetworkRequests::PartialEncodedChunkResponse { partial_encoded_chunk, .. } = response {
+        assert_eq!(partial_encoded_chunk.chunk_hash, block1.chunks[0].chunk_hash());
+    } else {
+        println!("{:?}", response);
+        assert!(false);
+    }
 }

@@ -598,6 +598,10 @@ impl Client {
             });
         }
 
+        if status.is_new_head() {
+            self.shards_mgr.update_largest_seen_height(block.header.inner.height);
+        }
+
         if let Some(bp) = self.block_producer.clone() {
             // Reconcile the txpool against the new block *after* we have broadcast it too our peers.
             // This may be slow and we do not want to delay block propagation.

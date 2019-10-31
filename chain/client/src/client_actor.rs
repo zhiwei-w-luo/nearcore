@@ -641,12 +641,29 @@ impl ClientActor {
     ) -> Result<(), Error> {
         match self.client.produce_block(next_height, elapsed_since_last_block) {
             Ok(Some(block)) => {
+                let block_hash = block.hash();
                 let res = self.process_block(block, Provenance::PRODUCED);
-                if res.is_err() {
-                    error!(target: "client", "Failed to process freshly produced block: {:?}", res);
-                    byzantine_assert!(false);
+                match &res {
+                    Ok(_) => Ok(()),
+                    Err(e) => match e.kind() {
+                        near_chain::ErrorKind::ChunksMissing(missing_chunks) => {
+                            debug!(
+                                "Chunks were missing for newly produced block {}, I'm {:?}, requesting. Missing: {:?}, ({:?})",
+                                block_hash,
+                                self.client.block_producer.as_ref().map(|bp| bp.account_id.clone()),
+                                missing_chunks.clone(),
+                                missing_chunks.iter().map(|header| header.chunk_hash()).collect::<Vec<_>>()
+                            );
+                            self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
+                            Ok(())
+                        }
+                        _ => {
+                            error!(target: "client", "Failed to process freshly produced block: {:?}", res);
+                            byzantine_assert!(false);
+                            res.map_err(|err| err.into())
+                        }
+                    },
                 }
-                res.map_err(|err| err.into())
             }
             Ok(None) => Ok(()),
             Err(err) => Err(err),

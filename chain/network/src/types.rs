@@ -970,27 +970,8 @@ impl Message for QueryPeerStats {
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, BorshSerialize, BorshDeserialize)]
-pub struct ChunkPartRequestMsg {
-    pub shard_id: ShardId,
-    pub chunk_hash: ChunkHash,
-    pub height: BlockIndex,
-    pub part_id: u64,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, BorshSerialize, BorshDeserialize)]
-pub struct ChunkOnePartRequestMsg {
-    pub shard_id: ShardId,
-    pub chunk_hash: ChunkHash,
-    pub height: BlockIndex,
-    pub part_id: u64,
-    pub tracking_shards: HashSet<ShardId>,
-}
-
-#[derive(Clone, Debug, Eq, PartialEq, BorshSerialize, BorshDeserialize)]
 pub struct PartialEncodedChunkRequestMsg {
-    pub shard_id: ShardId,
     pub chunk_hash: ChunkHash,
-    pub height: BlockIndex,
     pub part_ords: Vec<u64>,
     pub tracking_shards: HashSet<ShardId>,
 }

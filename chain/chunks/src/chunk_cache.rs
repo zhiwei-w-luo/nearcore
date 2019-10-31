@@ -59,7 +59,22 @@ impl EncodedChunksCache {
         self.encoded_chunks.remove(&chunk_hash)
     }
 
-    pub fn process_partial_encoded_chunk(
+    pub fn insert(&mut self, chunk_hash: ChunkHash, entry: EncodedChunksCacheEntry) {
+        self.encoded_chunks.insert(chunk_hash, entry);
+    }
+
+    // `chunk_header` must be `Some` if the entry is absent, caller must ensure that
+    pub fn get_or_insert_from_header(
+        &mut self,
+        chunk_hash: ChunkHash,
+        chunk_header: Option<&ShardChunkHeader>,
+    ) -> &mut EncodedChunksCacheEntry {
+        self.encoded_chunks.entry(chunk_hash).or_insert_with(|| {
+            EncodedChunksCacheEntry::from_chunk_header(chunk_header.unwrap().clone())
+        })
+    }
+
+    pub fn merge_in_partial_encoded_chunk(
         &mut self,
         partial_encoded_chunk: &PartialEncodedChunk,
     ) -> bool {
@@ -68,7 +83,7 @@ impl EncodedChunksCache {
             if let Some(header) = &partial_encoded_chunk.header {
                 let height = header.inner.height_created;
 
-                if height < self.largest_seen_height - HEIGHT_HORIZON {
+                if height + HEIGHT_HORIZON < self.largest_seen_height {
                     return false;
                 }
 
@@ -77,16 +92,7 @@ impl EncodedChunksCache {
                 }
             }
 
-            // TODO: fetch from the permament storage if needed
-            //self.fetch_from_storage(chunk_hash);
-
-            self.encoded_chunks
-                .entry(chunk_hash)
-                .or_insert_with(|| {
-                    EncodedChunksCacheEntry::from_chunk_header(
-                        partial_encoded_chunk.header.clone().unwrap(),
-                    )
-                })
+            self.get_or_insert_from_header(chunk_hash, partial_encoded_chunk.header.as_ref())
                 .merge_in_partial_encoded_chunk(&partial_encoded_chunk);
             return true;
         } else {
@@ -97,8 +103,8 @@ impl EncodedChunksCache {
     pub fn update_largest_seen_height(&mut self, new_height: BlockIndex) {
         let old_largest_seen_height = self.largest_seen_height;
         self.largest_seen_height = new_height;
-        for height in
-            old_largest_seen_height - HEIGHT_HORIZON..self.largest_seen_height - HEIGHT_HORIZON
+        for height in old_largest_seen_height.saturating_sub(HEIGHT_HORIZON)
+            ..self.largest_seen_height.saturating_sub(HEIGHT_HORIZON)
         {
             if let Some(chunks_to_remove) = self.height_map.remove(&height) {
                 for chunk_hash in chunks_to_remove {

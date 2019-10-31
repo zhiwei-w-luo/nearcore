@@ -170,9 +170,14 @@ impl EncodedShardChunkBody {
         fetched_parts
     }
 
-    pub fn reconstruct(&mut self, data_shards: usize, parity_shards: usize) {
+    // Returns true if reconstruction was successful
+    pub fn reconstruct(
+        &mut self,
+        data_shards: usize,
+        parity_shards: usize,
+    ) -> Result<(), reed_solomon_erasure::Error> {
         let rs = ReedSolomon::new(data_shards, parity_shards).unwrap();
-        rs.reconstruct_shards(self.parts.as_mut_slice()).unwrap();
+        rs.reconstruct_shards(self.parts.as_mut_slice())
     }
 
     pub fn get_merkle_hash_and_paths(&self) -> (MerkleHash, Vec<MerklePath>) {
@@ -282,7 +287,7 @@ impl EncodedShardChunk {
         signer: &dyn Signer,
     ) -> (Self, Vec<MerklePath>) {
         let mut content = EncodedShardChunkBody { parts };
-        content.reconstruct(data_shards, parity_shards);
+        content.reconstruct(data_shards, parity_shards).unwrap();
         let (encoded_merkle_root, merkle_paths) = content.get_merkle_hash_and_paths();
         let header = ShardChunkHeader::new(
             prev_block_hash,
