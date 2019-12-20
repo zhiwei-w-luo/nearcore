@@ -154,10 +154,12 @@ impl NightshadeRuntime {
 
     fn genesis_state_from_records(&self) -> (StoreUpdate, Vec<StateRoot>) {
         let mut store_update = self.store.store_update();
+        println!("7");
         let mut state_roots = vec![];
         let num_shards = self.genesis_config.block_producers_per_shard.len() as ShardId;
         let mut shard_records: Vec<Vec<StateRecord>> = (0..num_shards).map(|_| vec![]).collect();
         let mut has_protocol_account = false;
+        println!("8");
         for record in self.genesis_config.records.iter() {
             shard_records[state_record_to_shard_id(record, num_shards) as usize]
                 .push(record.clone());
@@ -167,8 +169,10 @@ impl NightshadeRuntime {
                 }
             }
         }
+        println!("9");
         assert!(has_protocol_account, "Genesis spec doesn't have protocol treasury account");
         for shard_id in 0..num_shards {
+            println!("10");
             let validators = self
                 .genesis_config
                 .validators
@@ -185,15 +189,21 @@ impl NightshadeRuntime {
                     }
                 })
                 .collect::<Vec<_>>();
+            println!("11");
             let state_update = TrieUpdate::new(self.trie.clone(), MerkleHash::default());
+            println!("12");
             let (shard_store_update, state_root) = self.runtime.apply_genesis_state(
                 state_update,
                 &validators,
                 &shard_records[shard_id as usize],
             );
+            println!("13");
             store_update.merge(shard_store_update);
+            println!("14");
             state_roots.push(state_root);
+            println!("15");
         }
+        println!("16");
         (store_update, state_roots)
     }
 
@@ -363,19 +373,25 @@ pub fn state_record_to_shard_id(state_record: &StateRecord, num_shards: ShardId)
 
 impl RuntimeAdapter for NightshadeRuntime {
     fn genesis_state(&self) -> (StoreUpdate, Vec<StateRoot>) {
+        println!("1");
         let has_records = !self.genesis_config.records.is_empty();
+        println!("2");
         let has_dump = {
             let mut state_dump = self.home_dir.clone();
             state_dump.push(STATE_DUMP_FILE);
             state_dump.exists()
         };
+        println!("3");
         if has_dump {
             if has_records {
                 log::warn!("Found both records in genesis config and the state dump file. Will ignore the records.");
             }
             self.genesis_state_from_dump()
         } else if has_records {
-            self.genesis_state_from_records()
+            println!("5");
+            let r = self.genesis_state_from_records();
+            println!("666");
+            r
         } else {
             panic!("Found neither records in the config nor the state dump file. Either one should be present")
         }

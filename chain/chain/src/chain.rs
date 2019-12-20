@@ -217,15 +217,19 @@ impl Chain {
         runtime_adapter: Arc<dyn RuntimeAdapter>,
         chain_genesis: &ChainGenesis,
     ) -> Result<Chain, Error> {
+        println!("enter Chain::new");
         let mut store = ChainStore::new(store);
+        println!("created ChainStore");
 
         // Get runtime initial state and create genesis block out of it.
         let (state_store_update, state_roots) = runtime_adapter.genesis_state();
+        println!("got genesis_state");
         let genesis_chunks = genesis_chunks(
             state_roots.clone(),
             runtime_adapter.num_shards(),
             chain_genesis.gas_limit,
         );
+        println!("got genesis chunks");
         let genesis = Block::genesis(
             genesis_chunks.iter().map(|chunk| chunk.header.clone()).collect(),
             chain_genesis.time,
@@ -233,7 +237,7 @@ impl Chain {
             chain_genesis.total_supply,
             Chain::compute_bp_hash(&*runtime_adapter, EpochId::default(), &CryptoHash::default())?,
         );
-
+        println!("got genesis");
         // Check if we have a head in the store, otherwise pick genesis block.
         let mut store_update = store.store_update();
         let head_res = store_update.head();

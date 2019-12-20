@@ -461,16 +461,32 @@ impl TrieChanges {
         store_update: &mut StoreUpdate,
     ) -> Result<(), Box<dyn std::error::Error>> {
         store_update.trie = Some(trie.clone());
+        println!("insertions: {}", self.insertions.len());
+        use std::time::{Duration, Instant};
+        let mut time1: Duration = Duration::new(0, 0);
+        let mut time11: Duration = Duration::new(0, 0);
+        let mut time2: Duration = Duration::new(0, 0);
+        let mut time3: Duration = Duration::new(0, 0);
+
         for (key, value, rc) in self.insertions.iter() {
-            let storage_rc = trie
-                .storage
-                .as_caching_storage()
-                .expect("Must be caching storage")
-                .retrieve_rc(&key)
-                .unwrap_or_default();
+            let start = Instant::now();
+            let s = trie.storage.as_caching_storage().expect("Must be caching storage");
+            time1 += start.elapsed();
+
+            let start = Instant::now();
+            let storage_rc = s.retrieve_rc(&key).unwrap_or_default();
+            time11 += start.elapsed();
+
+            let start = Instant::now();
             let bytes = RcTrieNode::encode(&value, storage_rc + rc)?;
+            time2 += start.elapsed();
+
+            let start = Instant::now();
             store_update.set(ColState, key.as_ref(), &bytes);
+            time3 += start.elapsed();
         }
+        trie_storage::print_retrieve_rc_time();
+        println!("time1 time11 time2 time3 {:?} {:?} {:?} {:?}", time1, time11, time2, time3);
         Ok(())
     }
 
@@ -502,6 +518,7 @@ impl TrieChanges {
         self,
         trie: Arc<Trie>,
     ) -> Result<(StoreUpdate, StateRoot), Box<dyn std::error::Error>> {
+        println!("a");
         let mut store_update = StoreUpdate::new_with_trie(
             trie.storage
                 .as_caching_storage()
@@ -511,8 +528,13 @@ impl TrieChanges {
                 .clone(),
             trie.clone(),
         );
-        self.insertions_into(trie.clone(), &mut store_update)?;
+        println!("b");
+        let t = trie.clone();
+        println!("bb");
+        self.insertions_into(t, &mut store_update)?;
+        println!("c");
         self.deletions_into(trie, &mut store_update)?;
+        println!("d");
         Ok((store_update, self.new_root))
     }
 }

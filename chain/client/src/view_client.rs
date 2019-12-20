@@ -54,7 +54,9 @@ impl ViewClientActor {
         network_adapter: Arc<dyn NetworkAdapter>,
     ) -> Result<Self, Error> {
         // TODO: should we create shared ChainStore that is passed to both Client and ViewClient?
+        println!("enter ViewClientActor");
         let chain = Chain::new(store, runtime_adapter.clone(), chain_genesis)?;
+        println!("created chain");
         Ok(ViewClientActor {
             chain,
             runtime_adapter,

@@ -1168,6 +1168,7 @@ impl Runtime {
         validators: &[(AccountId, PublicKey, Balance)],
         records: &[StateRecord],
     ) -> (StoreUpdate, StateRoot) {
+        println!("apply_genesis_state {}", records.len());
         let mut postponed_receipts: Vec<Receipt> = vec![];
         for record in records {
             match record.clone() {
@@ -1204,6 +1205,7 @@ impl Runtime {
                 }
             }
         }
+        println!("records done");
         for (account_id, storage_usage) in self.compute_storage_usage(records) {
             let mut account = get_account(&state_update, &account_id)
                 .expect("Genesis storage error")
@@ -1211,6 +1213,7 @@ impl Runtime {
             account.storage_usage = storage_usage;
             set_account(&mut state_update, &account_id, &account);
         }
+        println!("compute storage usage done");
         // Processing postponed receipts after we stored all received data
         for receipt in postponed_receipts {
             let account_id = &receipt.receiver_id;
@@ -1244,6 +1247,7 @@ impl Runtime {
                 set_receipt(&mut state_update, &receipt);
             }
         }
+        println!("receipts done");
 
         for (account_id, _, amount) in validators {
             let mut account: Account = get_account(&state_update, account_id)
@@ -1252,12 +1256,18 @@ impl Runtime {
             account.locked = *amount;
             set_account(&mut state_update, account_id, &account);
         }
+        println!("validators done");
+
         let trie = state_update.trie.clone();
-        let (store_update, state_root) = state_update
-            .finalize()
-            .expect("Genesis state update failed")
-            .into(trie)
-            .expect("Genesis state update failed");
+        let a = state_update.finalize().expect("Genesis state update failed");
+        println!("finalize done");
+        let (store_update, state_root) = a.into(trie).expect("Genesis state update failed");
+        // let (store_update, state_root) = state_update
+        //     .finalize()
+        //     .expect("Genesis state update failed")
+        //     .into(trie)
+        //     .expect("Genesis state update failed");
+        println!("into trie done");
         (store_update, state_root)
     }
 }

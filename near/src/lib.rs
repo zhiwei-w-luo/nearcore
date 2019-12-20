@@ -53,6 +53,7 @@ pub fn start_with_config(
     config: NearConfig,
 ) -> (Addr<ClientActor>, Addr<ViewClientActor>) {
     let store = create_store(&get_store_path(home_dir));
+    println!("Success in create store");
     let runtime = Arc::new(NightshadeRuntime::new(
         home_dir,
         store.clone(),
@@ -60,8 +61,11 @@ pub fn start_with_config(
         config.client_config.tracked_accounts.clone(),
         config.client_config.tracked_shards.clone(),
     ));
+    println!("Success in create runtime");
 
     let telemetry = TelemetryActor::new(config.telemetry_config.clone()).start();
+    println!("Success in create telemetry");
+
     let chain_genesis = ChainGenesis::new(
         config.genesis_config.genesis_time,
         config.genesis_config.gas_limit,
@@ -72,17 +76,22 @@ pub fn start_with_config(
         config.genesis_config.transaction_validity_period,
         config.genesis_config.epoch_length,
     );
+    println!("Success in create runtime");
 
     let node_id = config.network_config.public_key.clone().into();
     let network_adapter = Arc::new(NetworkRecipient::new());
-    let view_client = ViewClientActor::new(
-        store.clone(),
-        &chain_genesis,
-        runtime.clone(),
-        network_adapter.clone(),
-    )
-    .unwrap()
-    .start();
+    println!("Success in create network adapter");
+
+    let s1 = store.clone();
+    println!("store cloned");
+    let r2 = runtime.clone();
+    println!("runtime cloned");
+    let n3 = network_adapter.clone();
+    println!("network adapter cloned");
+    let view_client = ViewClientActor::new(s1, &chain_genesis, r2, n3).unwrap();
+    println!("view client actor created");
+    let view_client = view_client.start();
+    println!("Success in start view client");
 
     let client_actor = ClientActor::new(
         config.client_config,
@@ -96,7 +105,10 @@ pub fn start_with_config(
     )
     .unwrap()
     .start();
+    println!("Success in create client actor");
+
     start_http(config.rpc_config, client_actor.clone(), view_client.clone());
+    println!("Success in start http");
 
     let network_actor = PeerManagerActor::new(
         store.clone(),
@@ -106,6 +118,7 @@ pub fn start_with_config(
     )
     .unwrap()
     .start();
+    println!("Success in start network actor");
 
     network_adapter.set_recipient(network_actor.recipient());
 

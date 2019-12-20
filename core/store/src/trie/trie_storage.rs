@@ -9,6 +9,17 @@ use near_primitives::hash::CryptoHash;
 use crate::trie::{RcTrieNode, POISONED_LOCK_ERR};
 use crate::{ColState, StorageError, Store};
 
+use lazy_static::lazy_static;
+use std::time::{Duration, Instant};
+
+lazy_static! {
+    static ref time1: Mutex<Duration> = Mutex::new(Duration::new(0, 0));
+    static ref time2: Mutex<Duration> = Mutex::new(Duration::new(0, 0));
+    static ref time3: Mutex<Duration> = Mutex::new(Duration::new(0, 0));
+    static ref time4: Mutex<Duration> = Mutex::new(Duration::new(0, 0));
+    static ref time5: Mutex<Duration> = Mutex::new(Duration::new(0, 0));
+}
+
 pub trait TrieStorage: Send + Sync {
     /// Get bytes of a serialized TrieNode.
     /// # Errors
@@ -109,19 +120,48 @@ impl TrieCachingStorage {
     /// # Errors
     /// StorageError::StorageInternalError if the storage fails internally.
     pub fn retrieve_rc(&self, hash: &CryptoHash) -> Result<u32, StorageError> {
+        let start = Instant::now();
         let mut guard = self.cache.lock().expect(POISONED_LOCK_ERR);
+        let end = start.elapsed();
+        let mut t1 = (*time1).lock().unwrap();
+        *t1 += end;
+
+        let start = Instant::now();
         if let Some(val) = (*guard).cache_get(hash) {
-            Self::vec_to_rc(val)
+            let r = Self::vec_to_rc(val);
+            let end = start.elapsed();
+            let mut t2 = (*time2).lock().unwrap();
+            *t2 += end;
+            r
         } else {
+            let start = Instant::now();
             let val = self
                 .store
                 .get(ColState, hash.as_ref())
                 .map_err(|_| StorageError::StorageInternalError)?;
+            let end = start.elapsed();
+            let mut t3 = (*time3).lock().unwrap();
+            *t3 += end;
+
+            let start = Instant::now();
             let rc = Self::vec_to_rc(&val);
+            let end = start.elapsed();
+            let mut t4 = (*time4).lock().unwrap();
+            *t4 += end;
+
+            let start = Instant::now();
             (*guard).cache_set(*hash, val);
+            let end = start.elapsed();
+            let mut t5 = (*time5).lock().unwrap();
+            *t5 += end;
+
             rc
         }
     }
+}
+
+pub fn print_retrieve_rc_time() {
+    println!("Debug: {:?} {:?} {:?} {:?} {:?}", *time1, *time2, *time3, *time4, *time5);
 }
 
 impl TrieStorage for TrieCachingStorage {
