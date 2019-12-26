@@ -1,9 +1,9 @@
-use crate::serialize::u128_dec_format;
 use crate::types::{AccountId, Balance, Nonce};
 use borsh::{BorshDeserialize, BorshSerialize};
 use near_crypto::PublicKey;
 use serde::{Deserialize, Serialize};
 use std::fmt::Display;
+use schemars::JsonSchema;
 
 use near_vm_errors::VMError;
 
@@ -31,7 +31,7 @@ impl std::fmt::Display for StorageError {
 impl std::error::Error for StorageError {}
 
 /// External
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub enum InvalidTxError {
     InvalidAccessKey(InvalidAccessKeyError),
     InvalidSigner {
@@ -50,14 +50,11 @@ pub enum InvalidTxError {
     InvalidSignature,
     NotEnoughBalance {
         signer_id: AccountId,
-        #[serde(with = "u128_dec_format")]
         balance: Balance,
-        #[serde(with = "u128_dec_format")]
         cost: Balance,
     },
     RentUnpaid {
         signer_id: AccountId,
-        #[serde(with = "u128_dec_format")]
         amount: Balance,
     },
     CostOverflow,
@@ -65,7 +62,7 @@ pub enum InvalidTxError {
     Expired,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub enum InvalidAccessKeyError {
     AccessKeyNotFound {
         account_id: AccountId,
@@ -82,20 +79,18 @@ pub enum InvalidAccessKeyError {
     NotEnoughAllowance {
         account_id: AccountId,
         public_key: PublicKey,
-        #[serde(with = "u128_dec_format")]
         allowance: Balance,
-        #[serde(with = "u128_dec_format")]
         cost: Balance,
     },
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub struct ActionError {
     pub index: Option<u64>,
     pub kind: ActionErrorKind,
 }
 
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub enum ActionErrorKind {
     AccountAlreadyExists {
         account_id: AccountId,
@@ -128,7 +123,6 @@ pub enum ActionErrorKind {
     },
     RentUnpaid {
         account_id: AccountId,
-        #[serde(with = "u128_dec_format")]
         amount: Balance,
     },
     TriesToUnstake {
@@ -136,11 +130,8 @@ pub enum ActionErrorKind {
     },
     TriesToStake {
         account_id: AccountId,
-        #[serde(with = "u128_dec_format")]
         stake: Balance,
-        #[serde(with = "u128_dec_format")]
         locked: Balance,
-        #[serde(with = "u128_dec_format")]
         balance: Balance,
     },
     FunctionCall(VMError),
@@ -416,7 +407,7 @@ impl Display for ActionErrorKind {
 }
 
 /// Error returned in the ExecutionOutcome in case of failure.
-#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[derive(BorshSerialize, BorshDeserialize, Debug, Clone, PartialEq, Eq, Deserialize, Serialize, JsonSchema)]
 pub enum ExecutionError {
     Action(ActionError),
     InvalidTx(InvalidTxError),
