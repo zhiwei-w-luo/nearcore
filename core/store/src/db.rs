@@ -1,6 +1,6 @@
 use rocksdb::{
-    BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, IteratorMode, Options, ReadOptions,
-    WriteBatch, DB,
+    BlockBasedIndexType, BlockBasedOptions, ColumnFamily, ColumnFamilyDescriptor, IteratorMode,
+    Options, ReadOptions, WriteBatch, DB,
 };
 use std::cmp;
 use std::collections::HashMap;
@@ -172,9 +172,16 @@ pub trait Database: Sync + Send {
     fn write(&self, batch: DBTransaction) -> Result<(), DBError>;
 }
 
+use std::time::{Duration, Instant};
 impl Database for RocksDB {
     fn get(&self, col: DBCol, key: &[u8]) -> Result<Option<Vec<u8>>, DBError> {
-        unsafe { Ok(self.db.get_cf_opt(&*self.cfs[col as usize], key, &self.read_options)?) }
+        // let key = &[0x01u8];
+        let t = Instant::now();
+        let r =
+            unsafe { Ok(self.db.get_cf_opt(&*self.cfs[col as usize], key, &self.read_options)?) };
+        let e = t.elapsed();
+        println!("db get {:?} {:?} -> {:?}\n {:?}", col, key, e, r);
+        r
     }
 
     fn iter<'a>(&'a self, col: DBCol) -> Box<dyn Iterator<Item = (Box<[u8]>, Box<[u8]>)> + 'a> {
@@ -232,6 +239,8 @@ impl Database for TestDB {
 fn rocksdb_read_options() -> ReadOptions {
     let mut read_options = ReadOptions::default();
     read_options.set_verify_checksums(false);
+    read_options.set_total_order_seek(false);
+    read_options.set_readahead_size(4 * 1024 * 1024);
     read_options
 }
 
@@ -259,17 +268,17 @@ fn rocksdb_block_based_options() -> BlockBasedOptions {
     block_opts.set_lru_cache(cache_size);
     block_opts.set_pin_l0_filter_and_index_blocks_in_cache(true);
     block_opts.set_cache_index_and_filter_blocks(true);
-
+    // block_opts.set_index_type(BlockBasedIndexType::HashSearch);
     block_opts
 }
 
 fn rocksdb_column_options() -> Options {
     let mut opts = Options::default();
-    opts.set_level_compaction_dynamic_level_bytes(true);
-    opts.set_block_based_table_factory(&rocksdb_block_based_options());
-    opts.optimize_level_style_compaction(1024 * 1024 * 128);
-    opts.set_target_file_size_base(1024 * 1024 * 64);
-    opts.set_compression_per_level(&[]);
+    // opts.set_level_compaction_dynamic_level_bytes(true);
+    // opts.set_block_based_table_factory(&rocksdb_block_based_options());
+    // opts.optimize_level_style_compaction(1024 * 1024 * 128);
+    // opts.set_target_file_size_base(1024 * 1024 * 64);
+    // opts.set_compression_per_level(&[]);
     opts
 }
 
