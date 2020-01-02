@@ -161,7 +161,7 @@ impl TrieCachingStorage {
 }
 
 pub fn print_retrieve_rc_time() {
-    println!("Debug: {:?} {:?} {:?} {:?} {:?}", *time1, *time2, *time3, *time4, *time5);
+    println!("Debug: {:?} {:?} !!{:?}!! {:?} {:?}", *time1, *time2, *time3, *time4, *time5);
 }
 
 impl TrieStorage for TrieCachingStorage {
