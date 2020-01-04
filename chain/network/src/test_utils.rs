@@ -13,7 +13,6 @@ use near_primitives::types::EpochId;
 
 use crate::types::{NetworkConfig, NetworkInfo, PeerId, PeerInfo, ROUTED_MESSAGE_TTL};
 use crate::PeerManagerActor;
-use near_chain::chain::WEIGHT_MULTIPLIER;
 use near_primitives::utils::index_to_bytes;
 
 /// Returns available port.
@@ -47,7 +46,7 @@ impl NetworkConfig {
             ttl_account_id_router: Duration::from_secs(60 * 60),
             routed_message_ttl: ROUTED_MESSAGE_TTL,
             max_routes_to_store: 1,
-            most_weighted_peer_horizon: 5 * WEIGHT_MULTIPLIER,
+            highest_peer_horizon: 5,
             push_info_period: Duration::from_millis(100),
             blacklist: HashMap::new(),
             outbound_disabled: false,
