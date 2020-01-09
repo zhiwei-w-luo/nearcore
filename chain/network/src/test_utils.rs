@@ -2,7 +2,7 @@ use std::collections::{HashMap, HashSet};
 use std::net::TcpListener;
 use std::time::Duration;
 
-use actix::{Actor, AsyncContext, Context, Handler, Message};
+use actix::{Actor, AsyncContext, Context, Handler, Message, System};
 use futures::{future, FutureExt};
 use rand::{thread_rng, RngCore};
 use tokio::time::delay_for;
@@ -82,6 +82,7 @@ impl PeerInfo {
 pub fn wait_or_panic(max_wait_ms: u64) {
     actix::spawn(delay_for(Duration::from_millis(max_wait_ms)).then(|_| {
         panic!("Timeout exceeded.");
+        System::current().stop();
         future::ready(())
     }));
 }
