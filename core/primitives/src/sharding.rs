@@ -5,6 +5,10 @@ use near_crypto::Signature;
 
 use crate::hash::{hash, CryptoHash};
 use crate::merkle::{merklize, MerklePath};
+use crate::randomness::{
+    ChunkRandomnessDkgInfoBody, ChunkRandomnessDkgInfoHeader,
+    DkgEncryptedSecretShareWithMerkleProofs,
+};
 use crate::receipt::Receipt;
 use crate::transaction::SignedTransaction;
 use crate::types::{Balance, BlockHeight, Gas, MerkleHash, ShardId, StateRoot, ValidatorStake};
@@ -61,6 +65,8 @@ pub struct ShardChunkHeaderInner {
     pub tx_root: CryptoHash,
     /// Validator proposals.
     pub validator_proposals: Vec<ValidatorStake>,
+    /// The commit for DKG, or the information for public key aggregation
+    pub shard_dkg_info_header: ChunkRandomnessDkgInfoHeader,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Clone, PartialEq, Eq, Debug)]
@@ -107,6 +113,7 @@ impl ShardChunkHeader {
         outgoing_receipts_root: CryptoHash,
         tx_root: CryptoHash,
         validator_proposals: Vec<ValidatorStake>,
+        shard_dkg_info_header: ChunkRandomnessDkgInfoHeader,
         signer: &dyn ValidatorSigner,
     ) -> Self {
         let inner = ShardChunkHeaderInner {
@@ -125,6 +132,7 @@ impl ShardChunkHeader {
             outgoing_receipts_root,
             tx_root,
             validator_proposals,
+            shard_dkg_info_header,
         };
         let (hash, signature) = signer.sign_chunk_header_inner(&inner);
         Self { inner, height_included: 0, signature, hash }
@@ -138,6 +146,7 @@ pub struct PartialEncodedChunk {
     pub header: Option<ShardChunkHeader>,
     pub parts: Vec<PartialEncodedChunkPart>,
     pub receipts: Vec<ReceiptProof>,
+    pub dkg_shares: Vec<DkgEncryptedSecretShareWithMerkleProofs>,
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, Eq, PartialEq)]
@@ -164,6 +173,7 @@ pub struct ShardChunk {
     pub header: ShardChunkHeader,
     pub transactions: Vec<SignedTransaction>,
     pub receipts: Vec<Receipt>,
+    pub shard_dkg_info: ChunkRandomnessDkgInfoBody,
 }
 
 #[derive(Default, BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
@@ -195,7 +205,11 @@ impl EncodedShardChunkBody {
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize)]
-struct TransactionReceipt(Vec<SignedTransaction>, Vec<Receipt>);
+struct TransactionsReceiptsAndDkgInfo(
+    Vec<SignedTransaction>,
+    Vec<Receipt>,
+    ChunkRandomnessDkgInfoBody,
+);
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct EncodedShardChunk {
@@ -221,6 +235,9 @@ impl EncodedShardChunk {
         validator_reward: Balance,
         balance_burnt: Balance,
 
+        shard_dkg_info_header: ChunkRandomnessDkgInfoHeader,
+        shard_dkg_info_body: ChunkRandomnessDkgInfoBody,
+
         tx_root: CryptoHash,
         validator_proposals: Vec<ValidatorStake>,
         transactions: Vec<SignedTransaction>,
@@ -228,7 +245,12 @@ impl EncodedShardChunk {
         outgoing_receipts_root: CryptoHash,
         signer: &dyn ValidatorSigner,
     ) -> Result<(EncodedShardChunk, Vec<MerklePath>), std::io::Error> {
-        let mut bytes = TransactionReceipt(transactions, outgoing_receipts.clone()).try_to_vec()?;
+        let mut bytes = TransactionsReceiptsAndDkgInfo(
+            transactions,
+            outgoing_receipts.clone(),
+            shard_dkg_info_body,
+        )
+        .try_to_vec()?;
 
         let mut parts = vec![];
         let data_parts = rs.data_shard_count();
@@ -265,6 +287,7 @@ impl EncodedShardChunk {
             outgoing_receipts_root,
             tx_root,
             validator_proposals,
+            shard_dkg_info_header,
             encoded_length as u64,
             parts,
             rs,
@@ -287,6 +310,7 @@ impl EncodedShardChunk {
         outgoing_receipts_root: CryptoHash,
         tx_root: CryptoHash,
         validator_proposals: Vec<ValidatorStake>,
+        shard_dkg_info_header: ChunkRandomnessDkgInfoHeader,
 
         encoded_length: u64,
         parts: Vec<Option<Box<[u8]>>>,
@@ -314,6 +338,7 @@ impl EncodedShardChunk {
             outgoing_receipts_root,
             tx_root,
             validator_proposals,
+            shard_dkg_info_header,
             signer,
         );
 
@@ -324,11 +349,21 @@ impl EncodedShardChunk {
         self.header.chunk_hash()
     }
 
+    /// Creates a `PartialEncodedChunk` to be sent to another block producer
+    ///
+    /// # Arguments
+    /// * `part_ords`      - ordinals of parts to be included.
+    /// * `include_header` - if `false`, the header will be set to `None`
+    /// * `receipts`       - the list of receipts to be included, with proofs
+    /// * `dkg_encrypted_secret_shares` - the secret shares to be sent to the block producer for DKG.
+    ///                      Are sent to the block producers of the next epoch
+    /// * `merkle_paths`   - the merkle proofs for each of the parts, indexed by `part_ord`
     pub fn create_partial_encoded_chunk(
         &self,
         part_ords: Vec<u64>,
         include_header: bool,
         receipts: Vec<ReceiptProof>,
+        dkg_shares: Vec<DkgEncryptedSecretShareWithMerkleProofs>,
         merkle_paths: &[MerklePath],
     ) -> PartialEncodedChunk {
         let parts = part_ords
@@ -346,6 +381,7 @@ impl EncodedShardChunk {
             header: if include_header { Some(self.header.clone()) } else { None },
             parts,
             receipts,
+            dkg_shares,
         }
     }
 
@@ -360,13 +396,14 @@ impl EncodedShardChunk {
             .take(self.header.inner.encoded_length as usize)
             .collect::<Vec<u8>>();
 
-        let transaction_receipts = TransactionReceipt::try_from_slice(&encoded_data)?;
+        let transaction_receipts = TransactionsReceiptsAndDkgInfo::try_from_slice(&encoded_data)?;
 
         Ok(ShardChunk {
             chunk_hash: self.chunk_hash(),
             header: self.header.clone(),
             transactions: transaction_receipts.0,
             receipts: transaction_receipts.1,
+            shard_dkg_info: transaction_receipts.2,
         })
     }
 }

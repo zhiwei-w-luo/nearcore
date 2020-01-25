@@ -937,8 +937,9 @@ impl EpochManager {
         //     the first block of the next epoch. For 121 to be the next block, the current block
         //     has height 120, 119 has the quorum pre-commit and 118 is finalized.
         // 121 - 118 = 3, hence the `last_finalized_height + 3`
-        Ok((block_info.last_finalized_height + 3 >= estimated_next_epoch_start
-            || self.config.num_block_producer_seats < 4)
+        Ok(!block_info.is_dkg_in_progress
+            && (block_info.last_finalized_height + 3 >= estimated_next_epoch_start
+                || self.config.num_block_producer_seats < 4)
             && block_info.height + 1 >= estimated_next_epoch_start)
     }
 
@@ -1407,6 +1408,7 @@ mod tests {
                 BlockInfo::new(
                     1,
                     0,
+                    false,
                     h[0],
                     vec![],
                     vec![],
@@ -1487,6 +1489,7 @@ mod tests {
                 BlockInfo::new(
                     2,
                     0,
+                    false,
                     h[1],
                     vec![],
                     vec![],
@@ -1518,6 +1521,7 @@ mod tests {
                 BlockInfo::new(
                     4,
                     0,
+                    false,
                     h[3],
                     vec![],
                     vec![],
@@ -1577,6 +1581,7 @@ mod tests {
                 BlockInfo::new(
                     1,
                     0,
+                    false,
                     h[0],
                     vec![],
                     vec![],
@@ -1606,6 +1611,7 @@ mod tests {
                 BlockInfo::new(
                     3,
                     0,
+                    false,
                     h[2],
                     vec![],
                     vec![],
@@ -1686,6 +1692,7 @@ mod tests {
                 BlockInfo {
                     height: 0,
                     last_finalized_height: 0,
+                    is_dkg_in_progress: false,
                     prev_hash: Default::default(),
                     epoch_first_block: h[0],
                     epoch_id: Default::default(),
@@ -1707,6 +1714,7 @@ mod tests {
                 BlockInfo {
                     height: 1,
                     last_finalized_height: 1,
+                    is_dkg_in_progress: false,
                     prev_hash: h[0],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -1728,6 +1736,7 @@ mod tests {
                 BlockInfo {
                     height: 2,
                     last_finalized_height: 2,
+                    is_dkg_in_progress: false,
                     prev_hash: h[1],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -1820,6 +1829,7 @@ mod tests {
                 BlockInfo {
                     height: 0,
                     last_finalized_height: 0,
+                    is_dkg_in_progress: false,
                     prev_hash: Default::default(),
                     epoch_first_block: h[0],
                     epoch_id: Default::default(),
@@ -1841,6 +1851,7 @@ mod tests {
                 BlockInfo {
                     height: 1,
                     last_finalized_height: 1,
+                    is_dkg_in_progress: false,
                     prev_hash: h[0],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -1862,6 +1873,7 @@ mod tests {
                 BlockInfo {
                     height: 2,
                     last_finalized_height: 2,
+                    is_dkg_in_progress: false,
                     prev_hash: h[1],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -1965,6 +1977,7 @@ mod tests {
                 BlockInfo {
                     height: 0,
                     last_finalized_height: 0,
+                    is_dkg_in_progress: false,
                     prev_hash: Default::default(),
                     epoch_first_block: h[0],
                     epoch_id: Default::default(),
@@ -1986,6 +1999,7 @@ mod tests {
                 BlockInfo {
                     height: 1,
                     last_finalized_height: 1,
+                    is_dkg_in_progress: false,
                     prev_hash: h[0],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -2007,6 +2021,7 @@ mod tests {
                 BlockInfo {
                     height: 2,
                     last_finalized_height: 2,
+                    is_dkg_in_progress: false,
                     prev_hash: h[1],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -2121,6 +2136,7 @@ mod tests {
                 BlockInfo {
                     height: 0,
                     last_finalized_height: 0,
+                    is_dkg_in_progress: false,
                     prev_hash: Default::default(),
                     epoch_first_block: h[0],
                     epoch_id: Default::default(),
@@ -2142,6 +2158,7 @@ mod tests {
                 BlockInfo {
                     height: 1,
                     last_finalized_height: 1,
+                    is_dkg_in_progress: false,
                     prev_hash: h[0],
                     epoch_first_block: h[1],
                     epoch_id: Default::default(),
@@ -2163,6 +2180,7 @@ mod tests {
                 BlockInfo {
                     height: 3,
                     last_finalized_height: 3,
+                    is_dkg_in_progress: false,
                     prev_hash: h[1],
                     epoch_first_block: h[2],
                     epoch_id: Default::default(),
@@ -2316,6 +2334,7 @@ mod tests {
             BlockInfo {
                 height: 1,
                 last_finalized_height: 1,
+                is_dkg_in_progress: false,
                 prev_hash: h[0],
                 epoch_first_block: h[1],
                 epoch_id: Default::default(),
@@ -2336,6 +2355,7 @@ mod tests {
             BlockInfo {
                 height: 2,
                 last_finalized_height: 2,
+                is_dkg_in_progress: false,
                 prev_hash: h[1],
                 epoch_first_block: h[1],
                 epoch_id: Default::default(),
@@ -2356,6 +2376,7 @@ mod tests {
             BlockInfo {
                 height: 3,
                 last_finalized_height: 3,
+                is_dkg_in_progress: false,
                 prev_hash: h[2],
                 epoch_first_block: h[3],
                 epoch_id: Default::default(),

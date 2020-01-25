@@ -5,6 +5,7 @@ use chrono::{DateTime, Utc};
 use failure::{Backtrace, Context, Fail};
 
 use near_primitives::challenge::{ChunkProofs, ChunkState};
+use near_primitives::randomness::ChunkRandomnessDkgInfoValidationError;
 use near_primitives::sharding::{ChunkHash, ShardChunkHeader};
 use near_primitives::types::ShardId;
 
@@ -65,6 +66,9 @@ pub enum ErrorKind {
     /// Invalid outcomes proof.
     #[fail(display = "Invalid Outcomes Proof")]
     InvalidOutcomesProof,
+    /// Invalid secret share (not matching the merkle root, or having shares that are not expected)
+    #[fail(display = "Invalid Encrypted Secret Share")]
+    InvalidEncryptedSecretShare,
     /// Invalid state payload on state sync.
     #[fail(display = "Invalid State Payload")]
     InvalidStatePayload,
@@ -110,6 +114,9 @@ pub enum ErrorKind {
     /// The information about the last doomslug final block is incorrect
     #[fail(display = "Invalid doomslug finality info")]
     InvalidDoomslugFinalityInfo,
+    /// Randomness beacon output is incorrect
+    #[fail(display = "Invalid randomness beacon output")]
+    InvalidRandomnessBeaconOutput,
     /// Invalid validator proposals in the block.
     #[fail(display = "Invalid Validator Proposals")]
     InvalidValidatorProposals,
@@ -164,6 +171,9 @@ pub enum ErrorKind {
     /// Storage error. Used for internal passing the error.
     #[fail(display = "Storage Error")]
     StorageError,
+    /// DKG info validation error
+    #[fail(display = "DKG info validation error: {:?}", _0)]
+    DKGInfoValidationError(ChunkRandomnessDkgInfoValidationError),
     /// Anything else
     #[fail(display = "Other Error: {}", _0)]
     Other(String),
@@ -226,6 +236,7 @@ impl Error {
             | ErrorKind::InvalidTxRoot
             | ErrorKind::InvalidChunkReceiptsRoot
             | ErrorKind::InvalidOutcomesProof
+            | ErrorKind::InvalidEncryptedSecretShare
             | ErrorKind::InvalidChunkHeadersRoot
             | ErrorKind::InvalidChunkTxRoot
             | ErrorKind::InvalidReceiptsProof
@@ -239,6 +250,7 @@ impl Error {
             | ErrorKind::InvalidFinalityInfo
             | ErrorKind::NotEnoughApprovals
             | ErrorKind::InvalidDoomslugFinalityInfo
+            | ErrorKind::InvalidRandomnessBeaconOutput
             | ErrorKind::InvalidValidatorProposals
             | ErrorKind::InvalidSignature
             | ErrorKind::InvalidApprovals
@@ -250,7 +262,8 @@ impl Error {
             | ErrorKind::InvalidRent
             | ErrorKind::InvalidShardId(_)
             | ErrorKind::InvalidStateRequest(_)
-            | ErrorKind::NotAValidator => true,
+            | ErrorKind::NotAValidator
+            | ErrorKind::DKGInfoValidationError(_) => true,
         }
     }
 

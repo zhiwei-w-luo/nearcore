@@ -12,6 +12,7 @@ use crate::network::{AnnounceAccount, PeerId};
 use crate::sharding::{ChunkHash, ShardChunkHeaderInner};
 use crate::telemetry::TelemetryInfo;
 use crate::types::{AccountId, BlockHeight, EpochId};
+use near_crypto::randomness::{DecryptedShare, DecryptionFailureProof, EncryptedShare};
 
 /// Validator signer that is used to sign blocks and approvals.
 pub trait ValidatorSigner: Sync + Send {
@@ -57,6 +58,12 @@ pub trait ValidatorSigner: Sync + Send {
         peer_id: &PeerId,
         epoch_id: &EpochId,
     ) -> Signature;
+
+    fn decode_share(
+        &self,
+        encrypted_secret_share: &EncryptedShare,
+        public_share: &[u8; 32], // compressed ristretto point
+    ) -> Result<DecryptedShare, DecryptionFailureProof>;
 
     /// Used by test infrastructure, only implement if make sense for testing otherwise raise `unimplemented`.
     fn write_to_file(&self, path: &Path);
@@ -122,6 +129,14 @@ impl ValidatorSigner for EmptyValidatorSigner {
         _epoch_id: &EpochId,
     ) -> Signature {
         Signature::default()
+    }
+
+    fn decode_share(
+        &self,
+        _encrypted_secret_share: &EncryptedShare,
+        _public_share: &[u8; 32],
+    ) -> Result<DecryptedShare, DecryptionFailureProof> {
+        unimplemented!()
     }
 
     fn write_to_file(&self, _path: &Path) {
@@ -225,6 +240,14 @@ impl ValidatorSigner for InMemoryValidatorSigner {
     ) -> Signature {
         let hash = AnnounceAccount::build_header_hash(&account_id, &peer_id, epoch_id);
         self.signer.sign(hash.as_ref())
+    }
+
+    fn decode_share(
+        &self,
+        encrypted_secret_share: &EncryptedShare,
+        public_share: &[u8; 32],
+    ) -> Result<DecryptedShare, DecryptionFailureProof> {
+        self.signer.decode_share(encrypted_secret_share, public_share)
     }
 
     fn write_to_file(&self, path: &Path) {

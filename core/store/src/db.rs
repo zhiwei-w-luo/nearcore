@@ -84,6 +84,9 @@ pub enum DBCol {
     ColChunkPerHeightShard = 35,
     /// Changes to key-values that we have recorded.
     ColKeyValueChanges = 36,
+    ColDkgCommittedPublicShares = 37,
+    ColDkgRawSecretShares = 38,
+    ColDkgAggregatedSecretShares = 39,
 }
 
 impl std::fmt::Display for DBCol {
@@ -126,12 +129,15 @@ impl std::fmt::Display for DBCol {
             Self::ColTransactions => "transactions",
             Self::ColChunkPerHeightShard => "hash of chunk per height and shard_id",
             Self::ColKeyValueChanges => "key value changes",
+            Self::ColDkgCommittedPublicShares => "DKG committed public shares",
+            Self::ColDkgRawSecretShares => "DKG secret shares before aggregation",
+            Self::ColDkgAggregatedSecretShares => "DKG aggregated secret shares",
         };
         write!(formatter, "{}", desc)
     }
 }
 
-const NUM_COLS: usize = 37;
+const NUM_COLS: usize = 40;
 
 pub struct DBTransaction {
     pub ops: Vec<DBOp>,

@@ -16,7 +16,7 @@ use near_network::{
     FullPeerInfo, NetworkClientMessages, NetworkClientResponses, NetworkRequests, NetworkResponses,
     PeerInfo,
 };
-use near_primitives::block::{Approval, BlockHeader};
+use near_primitives::block::{Approval, ApprovalAndRandRevealsRaw, BlockHeader};
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
 use near_primitives::merkle::merklize;
@@ -157,11 +157,15 @@ fn receive_network_block() {
                     EpochId(last_block.header.next_epoch_id.clone())
                 },
                 vec![],
+                vec![],
                 0,
                 0,
                 None,
                 vec![],
                 vec![],
+                Default::default(),
+                false,
+                last_block.header.hash,
                 &signer,
                 0.into(),
                 CryptoHash::default(),
@@ -221,11 +225,15 @@ fn receive_network_block_header() {
                     EpochId(last_block.header.next_epoch_id.clone())
                 },
                 vec![],
+                vec![],
                 0,
                 0,
                 None,
                 vec![],
                 vec![],
+                Default::default(),
+                false,
+                last_block.header.hash,
                 &signer,
                 0.into(),
                 CryptoHash::default(),
@@ -306,11 +314,15 @@ fn produce_block_with_approvals() {
                     EpochId(last_block.header.next_epoch_id.clone())
                 },
                 vec![],
+                vec![],
                 0,
                 0,
                 Some(0),
                 vec![],
                 vec![],
+                Default::default(),
+                false,
+                last_block.header.hash,
                 &signer1,
                 0.into(),
                 CryptoHash::default(),
@@ -328,8 +340,10 @@ fn produce_block_with_approvals() {
                     false,
                     &signer,
                 );
-                client
-                    .do_send(NetworkClientMessages::BlockApproval(approval, PeerInfo::random().id));
+                client.do_send(NetworkClientMessages::BlockApproval(
+                    ApprovalAndRandRevealsRaw { approval, rand_reveals: vec![] },
+                    PeerInfo::random().id,
+                ));
             }
 
             client.do_send(NetworkClientMessages::Block(block, PeerInfo::random().id, false));
@@ -381,11 +395,15 @@ fn invalid_blocks() {
                     EpochId(last_block.header.next_epoch_id.clone())
                 },
                 vec![],
+                vec![],
                 0,
                 0,
                 Some(0),
                 vec![],
                 vec![],
+                Default::default(),
+                false,
+                last_block.header.hash,
                 &signer,
                 0.into(),
                 CryptoHash::default(),
@@ -399,7 +417,6 @@ fn invalid_blocks() {
                 PeerInfo::random().id,
                 false,
             ));
-
             // Send proper block.
             let block2 = Block::produce(
                 &last_block.header.clone().into(),
@@ -412,11 +429,15 @@ fn invalid_blocks() {
                     EpochId(last_block.header.next_epoch_id.clone())
                 },
                 vec![],
+                vec![],
                 0,
                 0,
                 Some(0),
                 vec![],
                 vec![],
+                Default::default(),
+                false,
+                last_block.header.hash,
                 &signer,
                 0.into(),
                 CryptoHash::default(),

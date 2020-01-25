@@ -8,6 +8,7 @@ use near_crypto::{EmptySigner, PublicKey, Signer};
 use crate::account::{AccessKey, AccessKeyPermission};
 use crate::block::{Approval, Block};
 use crate::hash::CryptoHash;
+use crate::randomness::BlockRandomnessDKGInfo;
 use crate::transaction::{
     Action, AddKeyAction, CreateAccountAction, SignedTransaction, StakeAction, Transaction,
     TransferAction,
@@ -215,11 +216,15 @@ impl Block {
             epoch_id,
             next_epoch_id,
             approvals,
+            vec![],
             0,
             0,
             Some(0),
             vec![],
             vec![],
+            BlockRandomnessDKGInfo::default(),
+            false,
+            prev.hash(),
             signer,
             0.into(),
             CryptoHash::default(),

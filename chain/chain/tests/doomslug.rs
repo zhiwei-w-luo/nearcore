@@ -8,10 +8,10 @@ mod tests {
     use rand::{thread_rng, Rng};
 
     use near_chain::{Doomslug, DoomslugThresholdMode};
-    use near_crypto::{KeyType, SecretKey};
-    use near_primitives::block::Approval;
+    use near_crypto::KeyType;
+    use near_primitives::block::{Approval, ApprovalAndRandRevealsVerified};
     use near_primitives::hash::{hash, CryptoHash};
-    use near_primitives::types::{BlockHeight, ValidatorStake};
+    use near_primitives::types::BlockHeight;
     use near_primitives::validator_signer::InMemoryValidatorSigner;
 
     fn block_hash(height: BlockHeight) -> CryptoHash {
@@ -40,14 +40,10 @@ mod tests {
     ) -> (Duration, BlockHeight) {
         let account_ids =
             vec!["test1", "test2", "test3", "test4", "test5", "test6", "test7", "test8"];
-        let stakes = account_ids
+        let account_id_to_seats = account_ids
             .iter()
-            .map(|account_id| ValidatorStake {
-                account_id: account_id.to_string(),
-                stake: 1,
-                public_key: SecretKey::from_seed(KeyType::ED25519, account_id).public_key(),
-            })
-            .collect::<Vec<_>>();
+            .map(|account_id| (account_id.to_string(), 1u64))
+            .collect::<HashMap<_, _>>();
         let signers = account_ids
             .iter()
             .map(|account_id| {
@@ -91,7 +87,7 @@ mod tests {
         chain_lengths.insert(block_hash(1), 1);
 
         for ds in doomslugs.iter_mut() {
-            ds.set_tip(now, block_hash(1), None, 1, 1);
+            ds.set_tip(now, block_hash(1), None, vec![], 1, 1);
             hash_to_block_info.insert(block_hash(1), (1, 1));
         }
 
@@ -123,7 +119,14 @@ mod tests {
                         continue;
                     }
 
-                    doomslugs[me].on_approval_message(now, &approval.0, &stakes);
+                    doomslugs[me].on_approval_message(
+                        now,
+                        ApprovalAndRandRevealsVerified {
+                            approval: approval.0,
+                            rand_reveals: vec![],
+                        },
+                        &account_id_to_seats,
+                    );
                 }
             }
             approval_queue = new_approval_queue;
@@ -158,6 +161,7 @@ mod tests {
                                 now,
                                 block_hash(block_info.0),
                                 None,
+                                vec![],
                                 block_info.0 as BlockHeight,
                                 block_info.1,
                             );
@@ -170,7 +174,8 @@ mod tests {
             // 3. Process timers
             for ds in doomslugs.iter_mut() {
                 for approval in ds.process_timer(now) {
-                    approval_queue.push((approval, get_msg_delivery_time(now, gst, delta)));
+                    approval_queue
+                        .push((approval.approval, get_msg_delivery_time(now, gst, delta)));
                 }
             }
 
@@ -179,7 +184,7 @@ mod tests {
                 for target_height in
                     (ds.get_tip().1 + 1)..=ds.get_largest_height_crossing_threshold()
                 {
-                    if ds.ready_to_produce_block(now, target_height, true) {
+                    if ds.ready_to_produce_block(now, target_height, true, false) {
                         let parent_hash = ds.get_tip().0;
 
                         let is_ds_final = ds.is_prev_block_ds_final(parent_hash, target_height);
@@ -239,6 +244,7 @@ mod tests {
                             now,
                             block_hash,
                             None,
+                            vec![],
                             target_height as BlockHeight,
                             last_ds_final_height,
                         );

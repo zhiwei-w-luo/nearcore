@@ -3,6 +3,9 @@ use std::collections::{HashMap, HashSet};
 use cached::{Cached, SizedCache};
 
 use near_primitives::hash::CryptoHash;
+use near_primitives::randomness::{
+    DecryptionFailureProofWithMerkleProofs, DkgEncryptedSecretShareWithMerkleProofs,
+};
 use near_primitives::sharding::{
     ChunkHash, PartialEncodedChunk, PartialEncodedChunkPart, ReceiptProof, ShardChunkHeader,
 };
@@ -17,6 +20,8 @@ pub struct EncodedChunksCacheEntry {
     pub header: ShardChunkHeader,
     pub parts: HashMap<u64, PartialEncodedChunkPart>,
     pub receipts: HashMap<ShardId, ReceiptProof>,
+    pub dkg_shares: HashMap<u64, DkgEncryptedSecretShareWithMerkleProofs>,
+    pub dkg_challenges: HashMap<u64, DecryptionFailureProofWithMerkleProofs>,
 }
 
 pub struct EncodedChunksCache {
@@ -29,7 +34,13 @@ pub struct EncodedChunksCache {
 
 impl EncodedChunksCacheEntry {
     pub fn from_chunk_header(header: ShardChunkHeader) -> Self {
-        EncodedChunksCacheEntry { header, parts: HashMap::new(), receipts: HashMap::new() }
+        EncodedChunksCacheEntry {
+            header,
+            parts: HashMap::new(),
+            receipts: HashMap::new(),
+            dkg_shares: HashMap::new(),
+            dkg_challenges: HashMap::new(),
+        }
     }
 
     pub fn merge_in_partial_encoded_chunk(&mut self, partial_encoded_chunk: &PartialEncodedChunk) {
@@ -44,6 +55,13 @@ impl EncodedChunksCacheEntry {
             let shard_id = receipt.1.to_shard_id;
             if !self.receipts.contains_key(&shard_id) {
                 self.receipts.insert(shard_id, receipt.clone());
+            }
+        }
+
+        for share in partial_encoded_chunk.dkg_shares.iter() {
+            let part_ord = share.part_ord;
+            if !self.dkg_shares.contains_key(&part_ord) {
+                self.dkg_shares.insert(part_ord, share.clone());
             }
         }
     }
@@ -101,6 +119,7 @@ impl EncodedChunksCache {
     pub fn merge_in_partial_encoded_chunk(
         &mut self,
         partial_encoded_chunk: &PartialEncodedChunk,
+        challenges: Vec<DecryptionFailureProofWithMerkleProofs>,
     ) -> bool {
         let chunk_hash = partial_encoded_chunk.chunk_hash.clone();
         if self.encoded_chunks.contains_key(&chunk_hash) || partial_encoded_chunk.header.is_some() {
@@ -110,6 +129,9 @@ impl EncodedChunksCache {
             );
             let height = entry.header.inner.height_created;
             entry.merge_in_partial_encoded_chunk(&partial_encoded_chunk);
+            for challenge in challenges {
+                entry.dkg_challenges.insert(challenge.part_ord, challenge);
+            }
             self.height_map.entry(height).or_insert_with(|| HashSet::default()).insert(chunk_hash);
             return true;
         } else {
@@ -185,6 +207,7 @@ mod tests {
 
     use near_crypto::KeyType;
     use near_primitives::hash::CryptoHash;
+    use near_primitives::randomness::ChunkRandomnessDkgInfoHeader;
     use near_primitives::sharding::{PartialEncodedChunk, ShardChunkHeader};
     use near_primitives::validator_signer::InMemoryValidatorSigner;
 
@@ -214,12 +237,14 @@ mod tests {
                 CryptoHash::default(),
                 CryptoHash::default(),
                 vec![],
+                ChunkRandomnessDkgInfoHeader::None,
                 &signer,
             )),
             parts: vec![],
             receipts: vec![],
+            dkg_shares: vec![],
         };
-        assert!(cache.merge_in_partial_encoded_chunk(&partial_encoded_chunk));
+        assert!(cache.merge_in_partial_encoded_chunk(&partial_encoded_chunk, vec![]));
         cache.update_largest_seen_height::<ChunkRequestInfo>(2000, &HashMap::default());
         assert!(cache.encoded_chunks.is_empty());
         assert!(cache.height_map.is_empty());

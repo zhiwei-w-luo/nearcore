@@ -838,7 +838,7 @@ impl Handler<NetworkRequests> for PeerManagerActor {
                 self.send_message_to_account(
                     ctx,
                     &approval_message.target,
-                    RoutedMessageBody::BlockApproval(approval_message.approval),
+                    RoutedMessageBody::BlockApproval(approval_message.approval_and_rand_reveals),
                 );
                 NetworkResponses::NoResponse
             }

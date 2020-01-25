@@ -1,5 +1,6 @@
 use crate::hash::Hash512;
 use crate::util::{unpack, vmul2, Packable, Point, Scalar};
+use borsh::{BorshDeserialize, BorshSerialize};
 use c2_chacha::guts::ChaCha;
 use curve25519_dalek::constants::{
     RISTRETTO_BASEPOINT_POINT as G, RISTRETTO_BASEPOINT_TABLE as GT,
@@ -12,6 +13,7 @@ use std::iter::once;
 use std::ops::{AddAssign, Deref, DerefMut, Sub};
 
 pub use crate::vrf::{PublicKey, SecretKey};
+use curve25519_dalek::ristretto::CompressedRistretto;
 
 #[derive(Clone)]
 struct ChaChaScalars(ChaCha, Option<[u8; 32]>);
@@ -126,16 +128,19 @@ impl Params {
 pub struct PublicShares(pub Box<[u8]>);
 #[derive(Clone, PartialEq, Eq)]
 pub struct SecretShares(Box<[Scalar]>);
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct ValidatedPublicShares(Box<[Point]>);
 value_type!(pub, EncryptedShare, 32, "encrypted share");
+value_type!(pub, CompressedShare, 32, "compressed public share");
+#[derive(BorshSerialize, BorshDeserialize, PartialEq, Eq, Debug, Clone)]
+pub struct ValidatedPublicSharesCompressed(pub Vec<CompressedShare>);
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct DecryptedShare(Scalar);
+pub struct DecryptedShare(pub Scalar);
 value_type!(pub, DecryptionFailureProof, 96, "decryption failure proof");
-#[derive(Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct RandomEpoch(Box<[Point]>);
 #[derive(Copy, Clone, PartialEq, Eq)]
-pub struct RandomEpochSecret(Scalar);
+pub struct RandomEpochSecret(pub Scalar);
 #[derive(Copy, Clone)]
 pub struct RandomRound([u8; 32], Point);
 value_type!(pub, RandomShare, 96, "random share");
@@ -185,6 +190,16 @@ impl PublicShares {
         }
         Some(ValidatedPublicShares(res.into_boxed_slice()))
     }
+
+    pub fn skip_validation(&self) -> Option<ValidatedPublicShares> {
+        let k = (self.0.len() - 64) / 32;
+        assert!(self.0.len() >= 64 && self.0.len() % 32 == 0 && Params::is_valid_n(k));
+        let mut res = Vec::with_capacity(k);
+        for i in 0..k {
+            res.push(unpack(array_ref!(self.0, 32 * i, 32))?);
+        }
+        Some(ValidatedPublicShares(res.into_boxed_slice()))
+    }
 }
 
 fn xor32(a: [u8; 32], b: [u8; 32]) -> [u8; 32] {
@@ -218,6 +233,14 @@ impl ValidatedPublicShares {
         key: &SecretKey,
     ) -> Result<DecryptedShare, DecryptionFailureProof> {
         let p = self.get_element(index);
+        Self::try_decrypt_static(p, share, key)
+    }
+
+    pub fn try_decrypt_static(
+        p: Point,
+        share: &EncryptedShare,
+        key: &SecretKey,
+    ) -> Result<DecryptedShare, DecryptionFailureProof> {
         let ss = (&key.0 * &p).pack();
         if let Some(s) = unpack(&xor32(hash!(&ss), share.0)) {
             if &s * &GT == p {
@@ -237,6 +260,15 @@ impl ValidatedPublicShares {
         proof: &DecryptionFailureProof,
     ) -> bool {
         let p = self.get_element(index);
+        Self::is_valid_static(p, share, key, proof)
+    }
+
+    pub fn is_valid_static(
+        p: Point,
+        share: &EncryptedShare,
+        key: &PublicKey,
+        proof: &DecryptionFailureProof,
+    ) -> bool {
         if let Some(s) = Scalar::unpack(&xor32(hash!(&proof.0[..32]), share.0)) {
             if &s * &GT == p {
                 return false;
@@ -244,6 +276,40 @@ impl ValidatedPublicShares {
         }
         let (ss, r, c) = unwrap_or_return_false!(unpack(&proof.0));
         hash_s!(&key.0, p, ss, vmul2(r, &G, c, &key.1), vmul2(r, &p, c, &ss)) == c
+    }
+
+    pub fn compress(&self) -> ValidatedPublicSharesCompressed {
+        ValidatedPublicSharesCompressed(
+            self.0.iter().map(|x| CompressedShare::from_point(x)).collect(),
+        )
+    }
+
+    pub fn expand_and_compress(&self, n: usize) -> Vec<CompressedShare> {
+        (0..n).map(|ord| CompressedShare::from_point(&self.get_element(ord))).collect()
+    }
+}
+
+impl ValidatedPublicSharesCompressed {
+    pub fn decompress(&self) -> ValidatedPublicShares {
+        ValidatedPublicShares(
+            self.0.iter().map(|x| x.to_point()).collect::<Vec<_>>().into_boxed_slice(),
+        )
+    }
+}
+
+impl CompressedShare {
+    pub fn from_point(point: &Point) -> Self {
+        Self(point.compress().0)
+    }
+
+    pub fn to_point(&self) -> Point {
+        CompressedRistretto::from_slice(&self.0).decompress().unwrap()
+    }
+}
+
+impl DecryptedShare {
+    pub fn from_packed(b: [u8; 32]) -> Option<Self> {
+        Packable::unpack(&b).map(|x| Self(x))
     }
 }
 
@@ -262,7 +328,7 @@ impl RandomEpoch {
                 res.resize_with(n, Point::identity);
             }
             Some(s) => {
-                assert!(s.0.len() == k);
+                assert_eq!(s.0.len(), k);
                 res.extend_from_slice(s.0.deref());
                 for s in shares {
                     assert!(s.0.len() == k);
@@ -337,6 +403,10 @@ impl RandomEpochSecret {
                 s
             }
         })
+    }
+
+    pub fn from_bits(bits: [u8; 32]) -> Self {
+        Self(Scalar::from_bits(bits))
     }
 }
 

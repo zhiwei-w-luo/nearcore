@@ -23,8 +23,8 @@ use near_primitives::transaction::{
     TransferAction,
 };
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, EpochId, Gas, Nonce, NumBlocks, ShardId, StateChanges,
-    StateChangesRequest, StateRoot, StateRootNode, ValidatorStake, ValidatorStats,
+    AccountId, Balance, BlockHeight, BlockHeightDelta, EpochId, Gas, Nonce, NumBlocks, ShardId,
+    StateChanges, StateChangesRequest, StateRoot, StateRootNode, ValidatorStake, ValidatorStats,
 };
 use near_primitives::validator_signer::InMemoryValidatorSigner;
 use near_primitives::views::{
@@ -41,6 +41,7 @@ use crate::error::{Error, ErrorKind};
 use crate::store::ChainStoreAccess;
 use crate::types::ApplyTransactionResult;
 use crate::{BlockHeader, DoomslugThresholdMode, RuntimeAdapter};
+use near_primitives::randomness::BlockRandomnessDKGInfo;
 
 #[derive(
     BorshSerialize, BorshDeserialize, Serialize, Hash, PartialEq, Eq, Ord, PartialOrd, Clone, Debug,
@@ -179,9 +180,9 @@ impl KeyValueRuntime {
     fn get_epoch_and_valset(
         &self,
         prev_hash: CryptoHash,
-    ) -> Result<(EpochId, usize, EpochId), Error> {
+    ) -> Result<(EpochId, usize, EpochId, u64), Error> {
         if prev_hash == CryptoHash::default() {
-            return Ok((EpochId(prev_hash), 0, EpochId(prev_hash)));
+            return Ok((EpochId(prev_hash), 0, EpochId(prev_hash), 0));
         }
         let prev_block_header = self.get_block_header(&prev_hash)?.ok_or_else(|| {
             ErrorKind::Other(format!("Missing block {} when computing the epoch", prev_hash))
@@ -203,7 +204,7 @@ impl KeyValueRuntime {
         let prev_epoch_start = *epoch_start_map.get(&prev_prev_hash).unwrap();
 
         let increment_epoch = prev_prev_hash == CryptoHash::default() // genesis is in its own epoch
-            || prev_block_header.inner_lite.height - prev_epoch_start >= self.epoch_length;
+            || (prev_block_header.inner_lite.height - prev_epoch_start >= self.epoch_length && !prev_block_header.inner_rest.dkg_in_progress);
 
         let (epoch, next_epoch, valset, epoch_start) = if increment_epoch {
             let new_valset = match prev_valset {
@@ -231,7 +232,7 @@ impl KeyValueRuntime {
         hash_to_valset.insert(next_epoch.clone(), valset + 1);
         epoch_start_map.insert(prev_hash, epoch_start);
 
-        Ok((epoch, valset as usize % self.validators.len(), next_epoch.clone()))
+        Ok((epoch, valset as usize % self.validators.len(), next_epoch.clone(), prev_epoch_start))
     }
 
     fn get_valset_for_epoch(&self, epoch_id: &EpochId) -> Result<usize, Error> {
@@ -263,6 +264,11 @@ impl RuntimeAdapter for KeyValueRuntime {
             return Err(ErrorKind::InvalidBlockProposer.into());
         }
         Ok(())
+    }
+
+    /// Returns the expected length of the epoch, in number of heights
+    fn get_epoch_length(&self) -> BlockHeightDelta {
+        self.epoch_length
     }
 
     fn verify_validator_signature(
@@ -366,6 +372,19 @@ impl RuntimeAdapter for KeyValueRuntime {
         Ok(validators[idx as usize % validators.len()].account_id.clone())
     }
 
+    fn get_next_epoch_part_owner(
+        &self,
+        parent_hash: &CryptoHash,
+        part_id: u64,
+    ) -> Result<String, Error> {
+        let validators = &self.validators
+            [(self.get_epoch_and_valset(*parent_hash)?.1 + 1) % self.validators.len()];
+        // if we don't use data_parts and total_parts as part of the formula here, the part owner
+        //     would not depend on height, and tests wouldn't catch passing wrong height here
+        let idx = part_id as usize + self.num_data_parts() + self.num_total_parts();
+        Ok(validators[idx as usize % validators.len()].account_id.clone())
+    }
+
     fn cares_about_shard(
         &self,
         account_id: Option<&AccountId>,
@@ -456,6 +475,7 @@ impl RuntimeAdapter for KeyValueRuntime {
         _current_hash: CryptoHash,
         _height: BlockHeight,
         _last_finalized_height: BlockHeight,
+        _is_dkg_in_progress: bool,
         _proposals: Vec<ValidatorStake>,
         _slashed_validators: Vec<SlashedValidator>,
         _validator_mask: Vec<bool>,
@@ -808,11 +828,7 @@ impl RuntimeAdapter for KeyValueRuntime {
     }
 
     fn get_epoch_start_height(&self, block_hash: &CryptoHash) -> Result<BlockHeight, Error> {
-        let epoch_id = self.get_epoch_and_valset(*block_hash)?.0;
-        match self.get_block_header(&epoch_id.0)? {
-            Some(block_header) => Ok(block_header.inner_lite.height),
-            None => Ok(0),
-        }
+        Ok(self.get_epoch_and_valset(*block_hash)?.3)
     }
 
     fn get_epoch_inflation(&self, _epoch_id: &EpochId) -> Result<u128, Error> {
@@ -872,10 +888,16 @@ impl RuntimeAdapter for KeyValueRuntime {
 
     fn get_validator_by_account_id(
         &self,
-        _epoch_id: &EpochId,
+        epoch_id: &EpochId,
         _last_known_block_hash: &CryptoHash,
-        _account_id: &String,
+        account_id: &String,
     ) -> Result<(ValidatorStake, bool), Error> {
+        let validators = &self.validators[self.get_valset_for_epoch(epoch_id)?];
+        for validator in validators {
+            if &validator.account_id == account_id {
+                return Ok((validator.clone(), false));
+            }
+        }
         Err(ErrorKind::NotAValidator.into())
     }
 
@@ -1089,11 +1111,15 @@ pub fn new_block_no_epoch_switches(
         epoch_id,
         next_epoch_id,
         approvals,
+        vec![],
         0,
         0,
         Some(0),
         vec![],
         vec![],
+        BlockRandomnessDKGInfo::default(),
+        false,
+        prev_block.hash(),
         signer,
         0.into(),
         CryptoHash::default(),

@@ -24,7 +24,7 @@ use near_primitives::transaction::{
 };
 use near_primitives::types::{
     AccountId, Balance, BlockExtra, BlockHeight, BlockHeightDelta, ChunkExtra, EpochId, Gas,
-    NumBlocks, ShardId, ValidatorStake,
+    NumBlocks, NumSeats, ShardId, ValidatorStake,
 };
 use near_primitives::unwrap_or_return;
 use near_primitives::views::{
@@ -48,6 +48,14 @@ use crate::validate::{
 };
 use crate::{byzantine_assert, create_light_client_block_view, Doomslug};
 use crate::{metrics, DoomslugThresholdMode};
+use near_crypto::key_conversion::convert_public_key;
+use near_crypto::randomness::{
+    CompressedShare, DecryptedShare, RandomEpochSecret, RandomRound, RandomShare,
+};
+use near_primitives::randomness::{
+    BlockRandomnessDKGCommitmentInfo, BlockRandomnessDKGInfo, ChunkRandomnessDkgInfoBody,
+    ChunkRandomnessDkgInfoHeader,
+};
 use rand::rngs::StdRng;
 use rand::seq::SliceRandom;
 use rand::SeedableRng;
@@ -305,6 +313,7 @@ impl Chain {
                         genesis.hash(),
                         genesis.header.inner_lite.height,
                         0,
+                        false,
                         vec![],
                         vec![],
                         vec![],
@@ -390,6 +399,80 @@ impl Chain {
         FinalityGadget::get_my_approval_reference_hash(last_hash, &mut self.store)
     }
 
+    /// Computes random reveals to be sent with the approval. Only returns something if the previous
+    /// rand info has the public shares for the epoch. For each particular part_ord only includes
+    /// the corresponding reveal if we know our secret share for the epoch and part ordinal.
+    ///
+    /// If the previous DKG info has no public shares, returns an empty vector.
+    /// Also returns an empty vector if there's no block producer (`me == None`).
+    ///
+    /// # Arguments
+    /// * `me` - the account id of the current block producer
+    /// * `last_hash` - the hash of the block being approved
+    pub fn get_my_rand_reveals(
+        &mut self,
+        me: &Option<AccountId>,
+        last_hash: CryptoHash,
+    ) -> Result<Vec<(NumSeats, RandomShare)>, Error> {
+        let me = match me {
+            Some(me) => me,
+            None => return Ok(vec![]),
+        };
+
+        let num_seats = self.runtime_adapter.num_total_parts() as NumSeats;
+
+        let next_epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&last_hash)?;
+
+        let last_block = self.get_block(&last_hash)?;
+
+        let random_epoch = match last_block.dkg_info.get_next_random_epoch(
+            num_seats,
+            next_epoch_id != last_block.header.inner_lite.epoch_id,
+        ) {
+            Some(random_epoch) => random_epoch,
+            None => return Ok(vec![]),
+        };
+
+        let random_round = RandomRound::new(&(last_hash.0).0, 0); // MOO height?
+
+        // Compute Result<Option<RandomShare>, _>, question-mark it, and then filter out Nones
+        let reveals = (0..self.runtime_adapter.num_total_parts())
+            .map(|part_ord| {
+                if &self.runtime_adapter.get_part_owner(&last_hash, part_ord as u64)? == me {
+                    match self
+                        .store
+                        .get_dkg_aggregated_secret_share(&next_epoch_id, part_ord as u64)
+                    {
+                        Ok(secret) => Ok(Some((
+                            part_ord as NumSeats,
+                            random_epoch.compute_share(
+                                &random_round,
+                                part_ord,
+                                &RandomEpochSecret::from_bits(secret.0),
+                            ),
+                        ))),
+                        Err(e) => {
+                            if let ErrorKind::DBNotFoundErr(_) = e.kind() {
+                                error!(
+                                    "Missing secret for part {}, skipping rand reveal",
+                                    part_ord
+                                );
+                                byzantine_assert!(false);
+                                Ok(None)
+                            } else {
+                                Err(e)
+                            }
+                        }
+                    }
+                } else {
+                    Ok(None)
+                }
+            })
+            .collect::<Result<Vec<Option<(NumSeats, RandomShare)>>, Error>>()?;
+
+        Ok(reveals.iter().filter_map(|x| *x).collect())
+    }
+
     pub fn compute_bp_hash_inner(bps: &Vec<ValidatorStake>) -> Result<CryptoHash, Error> {
         let mut arr = vec![];
         for bp in bps.iter() {
@@ -453,6 +536,28 @@ impl Chain {
         runtime_adapter: &dyn RuntimeAdapter,
         chain_store: &mut dyn ChainStoreAccess,
     ) -> Result<LightClientBlockView, Error> {
+        let mut header = header.clone();
+        let mut prev_hash = header.prev_hash;
+        let mut pushed_back_qc = header.inner_rest.last_quorum_pre_commit;
+
+        // Push `header` back for as long as the previous header has the same QC
+        loop {
+            if prev_hash == CryptoHash::default() {
+                debug_assert!(false);
+                break;
+            }
+
+            let prev_header = chain_store.get_block_header(&prev_hash)?;
+
+            if prev_header.inner_rest.last_quorum_pre_commit != pushed_back_qc {
+                header = prev_header.clone();
+                break;
+            }
+
+            prev_hash = prev_header.prev_hash;
+            pushed_back_qc = prev_header.inner_rest.last_quorum_pre_commit;
+        }
+
         // Compute actual, not pushed back, quorum_pre_commit
         let actual_quorum = Chain::compute_quorums(
             header.prev_hash,
@@ -470,19 +575,19 @@ impl Chain {
 
         let block_producers = get_epoch_block_producers_view(
             &final_block_header.inner_lite.epoch_id,
-            &header.prev_hash,
+            &prev_hash,
             runtime_adapter,
         )?;
 
         let next_block_producers = get_epoch_block_producers_view(
             &final_block_header.inner_lite.next_epoch_id,
-            &header.prev_hash,
+            &prev_hash,
             runtime_adapter,
         )?;
 
         create_light_client_block_view(
             &final_block_header,
-            &header.inner_rest.last_quorum_pre_commit,
+            &pushed_back_qc,
             chain_store,
             &block_producers,
             Some(next_block_producers),
@@ -711,6 +816,7 @@ impl Chain {
                     header.hash(),
                     header.inner_lite.height,
                     self.store.get_block_height(&header.inner_rest.last_quorum_pre_commit)?,
+                    header.inner_rest.dkg_in_progress,
                     header.inner_rest.validator_proposals.clone(),
                     vec![],
                     header.inner_rest.chunk_mask.clone(),
@@ -925,6 +1031,8 @@ impl Chain {
             Ok((head, needs_to_start_fetching_state)) => {
                 chain_update.commit()?;
 
+                self.aggregate_and_save_dkg_secret_share_if_needed(me, &block)?;
+
                 if needs_to_start_fetching_state {
                     debug!(target: "chain", "Downloading state for block {}", block.hash());
                     self.start_downloading_state(me, &block)?;
@@ -1018,6 +1126,46 @@ impl Chain {
                 _ => Err(e),
             },
         }
+    }
+
+    /// If the block is at the epoch boundary, aggregates the secret shares for the next epoch for
+    /// the parts that the current block producer is responsible.
+    /// The actual aggregation logic is in the `ChainUpdate::aggregate_and_save_dkg_secret_share`
+    ///
+    /// # Arguments:
+    /// * `me` - the account id of the current block producer
+    /// * `block` - the block, which, if it is the last block of an epoch, contains the shares to be
+    ///             aggregated in its DKG info
+    fn aggregate_and_save_dkg_secret_share_if_needed(
+        &mut self,
+        me: &Option<AccountId>,
+        block: &Block,
+    ) -> Result<(), Error> {
+        // Aggregate and save the aggregated secret share on epoch switches
+        if let Some(me) = me.as_ref() {
+            let next_epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&block.hash())?;
+            if block.header.inner_lite.epoch_id != next_epoch_id {
+                let mut chain_update = ChainUpdate::new(
+                    &mut self.store,
+                    self.runtime_adapter.clone(),
+                    &self.orphans,
+                    &self.blocks_with_missing_chunks,
+                    self.transaction_validity_period,
+                    self.epoch_length,
+                    &self.block_economics_config,
+                    self.doomslug_threshold_mode,
+                );
+                chain_update.aggregate_and_save_dkg_secret_share(
+                    me,
+                    &block.header.hash(),
+                    &next_epoch_id,
+                    &block.dkg_info,
+                )?;
+                chain_update.commit()?;
+            }
+        }
+
+        Ok(())
     }
 
     pub fn prev_block_is_caught_up(
@@ -2294,6 +2442,94 @@ impl<'a> ChainUpdate<'a> {
         })
     }
 
+    /// Is a wrapper around `ChunkRandomnessDkgInfo{Body, Header}::validate`. The body is optional,
+    /// if it is not provided, the body validation is skipped.
+    /// In case of successful header validation, saves the committed secret shares into storage
+    ///
+    /// # Arguments
+    /// `shard_id` - shard id of the chunk
+    /// `epoch_id` - epoch id of the block that would/does contain the chunk
+    /// `height_created` - the corresponding value from the chunk header
+    /// `prev_block` - the block on top of which the chunk is built
+    /// `shard_dkg_header` - the shard dkg header to be validated
+    /// `shard_dkg_body` - optional shard dkg body to be validated
+    /// `runtime_adapter`
+    /// `store` - storage to save the committed secret shares in case of successful validation
+    fn validate_chunk_dkg_info(
+        shard_id: ShardId,
+        epoch_id: &EpochId,
+        height_created: BlockHeight,
+        prev_block: &Block,
+        shard_dkg_header: &ChunkRandomnessDkgInfoHeader,
+        shard_dkg_body: Option<&ChunkRandomnessDkgInfoBody>,
+        runtime_adapter: Arc<dyn RuntimeAdapter>,
+        store: &mut ChainStoreUpdate,
+    ) -> Result<(), Error> {
+        let prev_phase = runtime_adapter.get_block_dkg_phase(&prev_block)?;
+
+        let account_id = runtime_adapter.get_chunk_producer(epoch_id, height_created, shard_id)?;
+        let producer_ordinal = runtime_adapter
+            .get_block_producer_ordinal(epoch_id, &prev_block.header.prev_hash, &account_id)?
+            .unwrap(); // safe to unwrap, because the account belongs to a block producer
+        let producer_pk = convert_public_key(
+            &runtime_adapter
+                .get_validator_by_account_id(epoch_id, &prev_block.header.prev_hash, &account_id)?
+                .0
+                .public_key
+                .unwrap_as_ed25519(),
+        )
+        .unwrap();
+
+        shard_dkg_header
+            .validate(
+                shard_id,
+                &prev_block.dkg_info,
+                prev_phase,
+                shard_dkg_body,
+                producer_ordinal,
+                &producer_pk,
+            )
+            .map_err(|e| {
+                byzantine_assert!(false);
+                ErrorKind::DKGInfoValidationError(e)
+            })?;
+
+        if let Some(shard_dkg_body) = shard_dkg_body {
+            let possibly_validated_shares = shard_dkg_body
+                .validate(
+                    &prev_block.dkg_info,
+                    prev_phase,
+                    producer_ordinal,
+                    &producer_pk,
+                    runtime_adapter.num_total_parts() as NumSeats,
+                )
+                .map_err(|e| {
+                    byzantine_assert!(false);
+                    ErrorKind::DKGInfoValidationError(e)
+                })?;
+
+            if let Some(validated_shares) = possibly_validated_shares {
+                if let ChunkRandomnessDkgInfoHeader::Commit { pk_merkle_root, .. } =
+                    shard_dkg_header
+                {
+                    if !prev_block.dkg_info.has_info(producer_ordinal) {
+                        store.save_dkg_committed_public_shares(
+                            epoch_id,
+                            producer_ordinal as u64,
+                            pk_merkle_root,
+                            validated_shares.compress(),
+                        );
+                    }
+                } else {
+                    // Validation would not pass if this was the case
+                    debug_assert!(false);
+                }
+            }
+        }
+
+        Ok(())
+    }
+
     fn apply_chunks(
         &mut self,
         me: &Option<AccountId>,
@@ -2334,8 +2570,8 @@ impl<'a> ChainUpdate<'a> {
                     )
                 }
             };
-            if care_about_shard {
-                if chunk_header.height_included == block.header.inner_lite.height {
+            if chunk_header.height_included == block.header.inner_lite.height {
+                let shard_dkg_body = if care_about_shard {
                     // Validate state root.
                     let prev_chunk_extra = self
                         .chain_store_update
@@ -2454,7 +2690,24 @@ impl<'a> ChainUpdate<'a> {
                         outcome_paths,
                     );
                     self.chain_store_update.save_transactions(chunk.transactions);
+
+                    Some(chunk.shard_dkg_info)
                 } else {
+                    None
+                };
+
+                Self::validate_chunk_dkg_info(
+                    shard_id,
+                    &block.header.inner_lite.epoch_id,
+                    chunk_header.inner.height_created,
+                    prev_block,
+                    &chunk_header.inner.shard_dkg_info_header,
+                    shard_dkg_body.as_ref(),
+                    self.runtime_adapter.clone(),
+                    &mut self.chain_store_update,
+                )?;
+            } else {
+                if care_about_shard {
                     let mut new_extra = self
                         .chain_store_update
                         .get_chunk_extra(&prev_block.hash(), shard_id)?
@@ -2544,7 +2797,10 @@ impl<'a> ChainUpdate<'a> {
                 }
 
                 // For the first block of the epoch we never apply state for the next epoch, so it's
-                // always caught up.
+                // never caught up. In rare cases in which the block producer tracks a subset of the
+                // same shards in the current epoch as in the previous, they might be caught up, but
+                // it is sufficiently rare to not specialcase it here. In such a case the catchup
+                // process will finish immediately, and will apply chunks for the next epoch.
                 (false, true)
             } else {
                 (self.prev_block_is_caught_up(&prev_prev_hash, &prev_hash)?, false)
@@ -2554,6 +2810,18 @@ impl<'a> ChainUpdate<'a> {
 
         // Check the header is valid before we proceed with the full block.
         self.process_header_for_block(&block.header, provenance, on_challenge)?;
+
+        let account_id_to_stake =
+            self.runtime_adapter.get_block_producers_to_seats_mapping(&prev_hash)?;
+        if !Doomslug::can_approved_block_be_produced(
+            self.doomslug_threshold_mode,
+            &block.header.inner_rest.approvals,
+            &block.rand_reveal,
+            &account_id_to_stake,
+            block.dkg_info.is_beacon_enabled(),
+        ) {
+            return Err(ErrorKind::NotEnoughApprovals.into());
+        }
 
         for approval in block.header.inner_rest.approvals.iter() {
             FinalityGadget::process_approval(me, approval, &mut self.chain_store_update)?;
@@ -2576,6 +2844,16 @@ impl<'a> ChainUpdate<'a> {
             return Err(ErrorKind::Other("Invalid block".into()).into());
         }
 
+        let dkg_in_progress =
+            block.dkg_info.is_in_progress(self.runtime_adapter.num_total_parts() as NumSeats);
+        if block.header.inner_rest.dkg_in_progress != dkg_in_progress {
+            byzantine_assert!(false);
+            return Err(ErrorKind::Other(
+                "Invalid block: expected dkg_in_progress doesn't match provided".into(),
+            )
+            .into());
+        }
+
         if !block.verify_gas_price(
             prev_gas_price,
             self.block_economics_config.min_gas_price,
@@ -2586,6 +2864,17 @@ impl<'a> ChainUpdate<'a> {
         }
 
         let prev_block = self.chain_store_update.get_block(&prev_hash)?.clone();
+
+        let computed_random_value = prev_block.get_next_random_value(
+            self.runtime_adapter.num_total_parts() as NumSeats,
+            block.header.inner_lite.epoch_id != prev_block.header.inner_lite.epoch_id,
+            &block.rand_reveal,
+        );
+        if computed_random_value != block.header.inner_rest.random_value {
+            println!("{} != {}", computed_random_value, block.header.inner_rest.random_value);
+            byzantine_assert!(false);
+            return Err(ErrorKind::InvalidRandomnessBeaconOutput.into());
+        }
 
         self.ping_missing_chunks(me, prev_hash, &block)?;
         self.save_incoming_receipts_from_block(me, &block)?;
@@ -2637,6 +2926,7 @@ impl<'a> ChainUpdate<'a> {
             block.hash(),
             block.header.inner_lite.height,
             last_finalized_height,
+            block.header.inner_rest.dkg_in_progress,
             block.header.inner_rest.validator_proposals.clone(),
             block.header.inner_rest.challenges_result.clone(),
             block.header.inner_rest.chunk_mask.clone(),
@@ -2691,6 +2981,65 @@ impl<'a> ChainUpdate<'a> {
         }
 
         Ok((res, needs_to_start_fetching_state))
+    }
+
+    fn aggregate_and_save_dkg_secret_share(
+        &mut self,
+        me: &AccountId,
+        prev_hash: &CryptoHash,
+        new_epoch_id: &EpochId,
+        prev_dkg_info: &BlockRandomnessDKGInfo,
+    ) -> Result<(), Error> {
+        for part_ord in 0..self.runtime_adapter.num_total_parts() {
+            let part_ord = part_ord as u64;
+
+            if &self.runtime_adapter.get_part_owner(prev_hash, part_ord)? != me {
+                continue;
+            }
+
+            let secret_shares = prev_dkg_info
+                .commitment_infos
+                .iter()
+                .filter_map(|commitment_info| {
+                    if let Some(BlockRandomnessDKGCommitmentInfo{ was_challenged, secret_shares_merkle_root, .. }) =
+                        commitment_info
+                    {
+                        if *was_challenged {
+                            None
+                        } else {
+                            let res = self
+                                .chain_store_update
+                                .get_dkg_raw_secret_share(&secret_shares_merkle_root, part_ord);
+
+                            let unpacked_res = res.map(|packed_secret_share| {
+                                DecryptedShare::from_packed(packed_secret_share.0)
+                                    .expect("Stored packed value cannot be unpacked")
+                            });
+                            Some(unpacked_res)
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect::<Result<Vec<_>, Error>>()
+                .map_err(|e| {
+                    error!(target: "chain", "Failed to aggregate secret shares, me: {:?}: {:?}", me, e);
+                    byzantine_assert!(false);
+                    e
+                })?;
+
+            let aggregated_share = CompressedShare(
+                RandomEpochSecret::from_shares(secret_shares.into_iter()).0.to_bytes(),
+            );
+
+            self.chain_store_update.save_dkg_aggregated_secret_share(
+                new_epoch_id,
+                part_ord,
+                aggregated_share,
+            );
+        }
+
+        Ok(())
     }
 
     pub fn create_light_client_block(
@@ -2830,7 +3179,7 @@ impl<'a> ChainUpdate<'a> {
         if *provenance != Provenance::PRODUCED {
             // first verify aggregated signature
             if !self.runtime_adapter.verify_approval_signature(
-                &prev_header.inner_lite.epoch_id,
+                &header.inner_lite.epoch_id,
                 &prev_header.hash,
                 &header.inner_rest.approvals,
             )? {
@@ -2854,19 +3203,17 @@ impl<'a> ChainUpdate<'a> {
             {
                 return Err(ErrorKind::InvalidFinalityInfo.into());
             };
-            let account_id_to_stake = self
-                .runtime_adapter
-                .get_epoch_block_producers_ordered(
-                    &prev_header.inner_lite.epoch_id,
-                    &header.prev_hash,
-                )?
-                .iter()
-                .map(|x| (x.0.account_id.clone(), x.0.stake))
-                .collect();
+            let account_id_to_stake =
+                self.runtime_adapter.get_block_producers_to_seats_mapping(&header.prev_hash)?;
+
+            // We don't have access to rand reveals here, so validate as if no random beacon output
+            // was needed. `ChainUpdate::process_block` contains a call with full validation
             if !Doomslug::can_approved_block_be_produced(
                 self.doomslug_threshold_mode,
                 &header.inner_rest.approvals,
+                &vec![],
                 &account_id_to_stake,
+                false,
             ) {
                 return Err(ErrorKind::NotEnoughApprovals.into());
             }
@@ -3235,14 +3582,11 @@ impl<'a> ChainUpdate<'a> {
                 self.transaction_validity_period,
             ) {
                 Ok((hash, account_ids)) => {
-                    let is_double_sign = match challenge.body {
-                        // If it's double signed block, we don't invalidate blocks just slash.
-                        ChallengeBody::BlockDoubleSign(_) => true,
-                        _ => {
-                            self.mark_block_as_challenged(&hash, block_hash)?;
-                            false
-                        }
-                    };
+                    let is_double_sign = challenge.body.is_double_sign();
+                    if challenge.body.invalidates_block() {
+                        self.mark_block_as_challenged(&hash, block_hash)?;
+                    }
+
                     let slash_validators: Vec<_> = account_ids
                         .into_iter()
                         .map(|id| SlashedValidator::new(id, is_double_sign))

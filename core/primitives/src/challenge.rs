@@ -4,6 +4,7 @@ use near_crypto::Signature;
 
 use crate::hash::{hash, CryptoHash};
 use crate::merkle::MerklePath;
+use crate::randomness::DecryptionFailureProofWithMerkleProofs;
 use crate::sharding::{EncodedShardChunk, ShardChunk, ShardChunkHeader};
 use crate::types::AccountId;
 use crate::validator_signer::ValidatorSigner;
@@ -72,6 +73,7 @@ pub enum ChallengeBody {
     BlockDoubleSign(BlockDoubleSign),
     ChunkProofs(ChunkProofs),
     ChunkState(ChunkState),
+    DecryptionFailureProof(DecryptionFailureProofWithMerkleProofs),
 }
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, PartialEq, Eq, Clone, Debug)]
@@ -93,6 +95,22 @@ impl Challenge {
     pub fn produce(body: ChallengeBody, signer: &dyn ValidatorSigner) -> Self {
         let (hash, signature) = signer.sign_challenge(&body);
         Self { body, account_id: signer.validator_id().clone(), signature, hash }
+    }
+}
+
+impl ChallengeBody {
+    pub fn invalidates_block(&self) -> bool {
+        match self {
+            ChallengeBody::BlockDoubleSign(_) | ChallengeBody::DecryptionFailureProof(_) => false,
+            ChallengeBody::ChunkProofs(_) | ChallengeBody::ChunkState(_) => true,
+        }
+    }
+
+    pub fn is_double_sign(&self) -> bool {
+        match self {
+            ChallengeBody::BlockDoubleSign(_) => true,
+            _ => false,
+        }
     }
 }
 

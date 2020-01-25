@@ -8,7 +8,7 @@ use near_primitives::views::{
 };
 
 use crate::error::Error;
-use crate::{ChainStoreAccess, ErrorKind, RuntimeAdapter};
+use crate::{byzantine_assert, ChainStoreAccess, ErrorKind, RuntimeAdapter};
 
 const MAX_LIGHT_CLIENT_FUTURE_BLOCKS: usize = 50;
 
@@ -132,6 +132,7 @@ pub fn create_light_client_block_view(
     }
 
     if !found_qc {
+        byzantine_assert!(false);
         return Err(ErrorKind::Other(
             "The block doesn't have quorum pre-commit within MAX_LIGHT_CLIENT_FUTURE_BLOCKS".into(),
         )
@@ -143,6 +144,7 @@ pub fn create_light_client_block_view(
     let qv_hash = match qv_hash {
         Some(qv_hash) => qv_hash,
         None => {
+            byzantine_assert!(false);
             return Err(ErrorKind::Other(
                 "The block passed to `create_light_client_block_view` doesn't have any block having it as quorum_pre_vote".into(),
             )

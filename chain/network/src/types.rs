@@ -19,7 +19,9 @@ use near_chain::{Block, BlockHeader};
 use near_chain_configs::PROTOCOL_VERSION;
 use near_crypto::{PublicKey, SecretKey, Signature};
 use near_metrics;
-use near_primitives::block::{Approval, ApprovalMessage, BlockScore, GenesisId, ScoreAndHeight};
+use near_primitives::block::{
+    ApprovalAndRandRevealsRaw, ApprovalMessage, BlockScore, GenesisId, ScoreAndHeight,
+};
 use near_primitives::challenge::Challenge;
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::{hash, CryptoHash};
@@ -206,7 +208,7 @@ pub struct Pong {
 #[derive(BorshSerialize, BorshDeserialize, Serialize, PartialEq, Eq, Clone, Debug)]
 #[allow(clippy::large_enum_variant)]
 pub enum RoutedMessageBody {
-    BlockApproval(Approval),
+    BlockApproval(ApprovalAndRandRevealsRaw),
     ForwardTx(SignedTransaction),
 
     TxStatusRequest(AccountId, CryptoHash),
@@ -1121,6 +1123,7 @@ pub enum NetworkAdversarialMessage {
     AdvDisableHeaderSync,
     AdvGetSavedBlocks,
     AdvSetSyncInfo(u64, u64),
+    AdvCreateInvalidDKGCommit,
 }
 
 #[derive(Debug)]
@@ -1137,7 +1140,7 @@ pub enum NetworkClientMessages {
     /// Received list of headers for syncing.
     BlockHeaders(Vec<BlockHeader>, PeerId),
     /// Block approval.
-    BlockApproval(Approval, PeerId),
+    BlockApproval(ApprovalAndRandRevealsRaw, PeerId),
     /// State response.
     StateResponse(StateResponseInfo),
 
@@ -1303,6 +1306,7 @@ pub struct PartialEncodedChunkRequestMsg {
     pub chunk_hash: ChunkHash,
     pub part_ords: Vec<u64>,
     pub tracking_shards: HashSet<ShardId>,
+    pub dkg_part_ords: Vec<u64>,
 }
 
 /// Adapter to break dependency of sub-components on the network requests.

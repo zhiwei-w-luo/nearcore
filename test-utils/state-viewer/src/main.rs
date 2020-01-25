@@ -242,6 +242,7 @@ fn replay_chain(
                     chain_store
                         .get_block_height(&header.inner_rest.last_quorum_pre_commit)
                         .unwrap(),
+                    false,
                     header.inner_rest.validator_proposals,
                     vec![],
                     header.inner_rest.chunk_mask,

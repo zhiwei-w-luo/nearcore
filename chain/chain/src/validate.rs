@@ -402,6 +402,10 @@ pub fn validate_challenge(
         ChallengeBody::ChunkState(chunk_state) => {
             validate_chunk_state_challenge(runtime_adapter, chunk_state)
         }
+        ChallengeBody::DecryptionFailureProof(_proof) => {
+            // MOO: fill in
+            Ok((CryptoHash::default(), vec![]))
+        }
     }
 }
 

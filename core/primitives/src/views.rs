@@ -14,6 +14,7 @@ use crate::errors::TxExecutionError;
 use crate::hash::{hash, CryptoHash};
 use crate::logging;
 use crate::merkle::MerklePath;
+use crate::randomness::ChunkRandomnessDkgInfoHeader;
 use crate::receipt::{ActionReceipt, DataReceipt, DataReceiver, Receipt, ReceiptEnum};
 use crate::serialize::{
     from_base64, option_base64_format, option_u128_dec_format, to_base64, u128_dec_format,
@@ -274,6 +275,9 @@ pub struct BlockHeaderView {
     pub outcome_root: CryptoHash,
     pub chunks_included: u64,
     pub challenges_root: CryptoHash,
+    pub dkg_info_hash: CryptoHash,
+    pub dkg_in_progress: bool,
+    pub random_value: CryptoHash,
     pub timestamp: u64,
     pub score: u64,
     pub validator_proposals: Vec<ValidatorStakeView>,
@@ -309,6 +313,9 @@ impl From<BlockHeader> for BlockHeaderView {
             chunk_tx_root: header.inner_rest.chunk_tx_root,
             chunks_included: header.inner_rest.chunks_included,
             challenges_root: header.inner_rest.challenges_root,
+            dkg_info_hash: header.inner_rest.dkg_info_hash,
+            dkg_in_progress: header.inner_rest.dkg_in_progress,
+            random_value: header.inner_rest.random_value,
             outcome_root: header.inner_lite.outcome_root,
             timestamp: header.inner_lite.timestamp,
             score: header.inner_rest.score.to_num(),
@@ -367,6 +374,9 @@ impl From<BlockHeaderView> for BlockHeader {
                 chunk_tx_root: view.chunk_tx_root,
                 chunks_included: view.chunks_included,
                 challenges_root: view.challenges_root,
+                dkg_info_hash: view.dkg_info_hash,
+                dkg_in_progress: view.dkg_in_progress,
+                random_value: view.random_value,
                 score: view.score.into(),
                 validator_proposals: view
                     .validator_proposals
@@ -499,6 +509,7 @@ impl From<ChunkHeaderView> for ShardChunkHeader {
                 outgoing_receipts_root: view.outgoing_receipts_root,
                 tx_root: view.tx_root,
                 validator_proposals: view.validator_proposals.into_iter().map(Into::into).collect(),
+                shard_dkg_info_header: ChunkRandomnessDkgInfoHeader::None,
             },
             height_included: view.height_included,
             signature: view.signature,

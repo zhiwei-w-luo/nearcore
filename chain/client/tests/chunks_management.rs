@@ -15,6 +15,7 @@ use near_network::types::PartialEncodedChunkRequestMsg;
 use near_network::{NetworkClientMessages, NetworkRequests, NetworkResponses, PeerInfo};
 use near_primitives::block::BlockHeader;
 use near_primitives::hash::{hash, CryptoHash};
+use near_primitives::randomness::ChunkRandomnessDkgInfoHeader;
 use near_primitives::sharding::{PartialEncodedChunk, ShardChunkHeader};
 use near_primitives::test_utils::init_integration_logger;
 use near_primitives::test_utils::{heavy_test, init_test_logger};
@@ -248,6 +249,7 @@ fn test_request_chunk_restart() {
         chunk_hash: block1.chunks[0].chunk_hash(),
         part_ords: vec![0],
         tracking_shards: HashSet::default(),
+        dkg_part_ords: vec![],
     };
     let client = &mut env.clients[0];
     client.shards_mgr.process_partial_encoded_chunk_request(
@@ -297,10 +299,12 @@ fn store_partial_encoded_chunk_sanity() {
             CryptoHash::default(),
             CryptoHash::default(),
             vec![],
+            ChunkRandomnessDkgInfoHeader::None,
             &signer,
         )),
         parts: vec![],
         receipts: vec![],
+        dkg_shares: vec![],
     };
     let block_hash = env.clients[0].chain.genesis().hash();
     let block = env.clients[0].chain.get_block(&block_hash).unwrap().clone();
@@ -343,6 +347,7 @@ fn store_partial_encoded_chunk_sanity() {
         CryptoHash::default(),
         CryptoHash::default(),
         vec![],
+        ChunkRandomnessDkgInfoHeader::None,
         &signer,
     );
     partial_encoded_chunk2.header = Some(h);
@@ -379,6 +384,7 @@ fn store_partial_encoded_chunk_sanity() {
         CryptoHash::default(),
         CryptoHash::default(),
         vec![],
+        ChunkRandomnessDkgInfoHeader::None,
         &signer,
     );
     partial_encoded_chunk3.header = Some(h.clone());

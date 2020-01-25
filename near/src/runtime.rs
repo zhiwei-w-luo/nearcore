@@ -27,9 +27,9 @@ use near_primitives::sharding::ShardChunkHeader;
 use near_primitives::state_record::StateRecord;
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, EpochId, Gas, MerkleHash, NumShards, ShardId,
-    StateChangeCause, StateChanges, StateChangesRequest, StateRoot, StateRootNode, ValidatorStake,
-    ValidatorStats,
+    AccountId, Balance, BlockHeight, BlockHeightDelta, EpochId, Gas, MerkleHash, NumShards,
+    ShardId, StateChangeCause, StateChanges, StateChangesRequest, StateRoot, StateRootNode,
+    ValidatorStake, ValidatorStats,
 };
 use near_primitives::utils::{prefix_for_access_key, ACCOUNT_DATA_SEPARATOR};
 use near_primitives::views::{
@@ -499,6 +499,11 @@ impl RuntimeAdapter for NightshadeRuntime {
         Ok(transactions)
     }
 
+    /// Returns the expected length of the epoch, in number of heights
+    fn get_epoch_length(&self) -> BlockHeightDelta {
+        self.genesis_config.epoch_length
+    }
+
     fn verify_validator_signature(
         &self,
         epoch_id: &EpochId,
@@ -723,6 +728,18 @@ impl RuntimeAdapter for NightshadeRuntime {
         Ok(settlement[part_id as usize % settlement.len()].0.account_id.clone())
     }
 
+    fn get_next_epoch_part_owner(
+        &self,
+        parent_hash: &CryptoHash,
+        part_id: u64,
+    ) -> Result<String, Error> {
+        let mut epoch_manager = self.epoch_manager.write().expect(POISONED_LOCK_ERR);
+        let epoch_id = epoch_manager.get_next_epoch_id_from_prev_block(parent_hash)?;
+        let settlement =
+            epoch_manager.get_all_block_producers_settlement(&epoch_id, parent_hash)?;
+        Ok(settlement[part_id as usize % settlement.len()].0.account_id.clone())
+    }
+
     fn cares_about_shard(
         &self,
         account_id: Option<&AccountId>,
@@ -786,6 +803,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         current_hash: CryptoHash,
         height: BlockHeight,
         last_finalized_height: BlockHeight,
+        is_dkg_in_progress: bool,
         proposals: Vec<ValidatorStake>,
         slashed_validators: Vec<SlashedValidator>,
         chunk_mask: Vec<bool>,
@@ -801,6 +819,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         let block_info = BlockInfo::new(
             height,
             last_finalized_height,
+            is_dkg_in_progress,
             parent_hash,
             proposals,
             chunk_mask,
@@ -1314,6 +1333,7 @@ mod test {
                     genesis_hash,
                     0,
                     0,
+                    false,
                     vec![],
                     vec![],
                     vec![],
@@ -1381,6 +1401,7 @@ mod test {
                     new_hash,
                     self.head.height + 1,
                     self.head.height.saturating_sub(1),
+                    false,
                     self.last_proposals.clone(),
                     challenges_result,
                     chunk_mask,
@@ -1787,6 +1808,7 @@ mod test {
                     cur_hash,
                     i,
                     i.saturating_sub(2),
+                    false,
                     new_env.last_proposals.clone(),
                     vec![],
                     vec![true],

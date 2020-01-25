@@ -19,7 +19,7 @@ use near_chain_configs::ClientConfig;
 use near_crypto::Signature;
 #[cfg(feature = "adversarial")]
 use near_network::types::NetworkAdversarialMessage::{
-    AdvDisableHeaderSync, AdvGetSavedBlocks, AdvProduceBlocks,
+    AdvCreateInvalidDKGCommit, AdvDisableHeaderSync, AdvGetSavedBlocks, AdvProduceBlocks,
 };
 use near_network::types::{NetworkInfo, ReasonForBan, StateResponseInfo};
 use near_network::{
@@ -212,6 +212,10 @@ impl Handler<NetworkClientMessages> for ClientActor {
                             num_blocks += 1;
                         }
                         NetworkClientResponses::AdvU64(num_blocks)
+                    }
+                    AdvCreateInvalidDKGCommit => {
+                        self.client.shards_mgr.adv_create_invalid_dkg_commit = true;
+                        NetworkClientResponses::NoResponse
                     }
                     _ => panic!("invalid adversary message"),
                 }
@@ -579,6 +583,10 @@ impl ClientActor {
         let epoch_id =
             self.client.runtime_adapter.get_epoch_id_from_prev_block(&head.last_block_hash)?;
 
+        // Check and update the doomslug tip here. Must do it now so that the checks for block
+        // production readiness is consistent with the actual witnesses fetched later
+        let _ = self.client.check_and_update_doomslug_tip()?;
+
         for height in
             latest_known.height + 1..=self.client.doomslug.get_largest_height_crossing_threshold()
         {
@@ -592,10 +600,18 @@ impl ClientActor {
                 let have_all_chunks =
                     head.height == 0 || num_chunks == self.client.runtime_adapter.num_shards();
 
+                // Fetching the head is cheap, since it should always be in the cache
+                let head_block = self.client.chain.get_block(&head.last_block_hash)?;
+
+                let need_random_value = head_block.dkg_info.is_beacon_enabled_next_block(
+                    head_block.header.inner_lite.epoch_id != epoch_id,
+                );
+
                 if self.client.doomslug.ready_to_produce_block(
                     Instant::now(),
                     height,
                     have_all_chunks,
+                    need_random_value,
                 ) {
                     if let Err(err) = self.produce_block(height) {
                         // If there is an error, report it and let it retry on the next loop step.
@@ -640,7 +656,7 @@ impl ClientActor {
                                 missing_chunks.clone(),
                                 missing_chunks.iter().map(|header| header.chunk_hash()).collect::<Vec<_>>()
                             );
-                            self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
+                            self.client.request_chunks(missing_chunks).unwrap();
                             Ok(())
                         }
                         _ => {
@@ -725,7 +741,9 @@ impl ClientActor {
             }
             Err(e) => match e.kind() {
                 near_chain::ErrorKind::Orphan => {
-                    if !self.client.chain.is_orphan(&prev_hash) {
+                    if !self.client.chain.is_orphan(&prev_hash)
+                        && !self.client.chain.is_chunk_orphan(&prev_hash)
+                    {
                         self.request_block_by_hash(prev_hash, peer_id)
                     }
                     NetworkClientResponses::NoResponse
@@ -739,7 +757,7 @@ impl ClientActor {
                         missing_chunks.clone(),
                         missing_chunks.iter().map(|header| header.chunk_hash()).collect::<Vec<_>>()
                     );
-                    self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
+                    self.client.request_chunks(missing_chunks).unwrap();
                     NetworkClientResponses::NoResponse
                 }
                 _ => {
@@ -900,7 +918,7 @@ impl ClientActor {
     fn doomslug_timer(&mut self, ctx: &mut Context<ClientActor>) {
         let _ = self.client.check_and_update_doomslug_tip();
 
-        let approvals = self.client.doomslug.process_timer(Instant::now());
+        let approvals_and_rand_revealss = self.client.doomslug.process_timer(Instant::now());
 
         // Important to save the largest skipped and endorsed heights before sending approvals, so
         // that if the node crashes in the meantime, we cannot get slashed on recovery
@@ -912,14 +930,14 @@ impl ClientActor {
 
         match chain_store_update.commit() {
             Ok(_) => {
-                for approval in approvals {
+                for approval_and_rand_reveals in approvals_and_rand_revealss {
                     // `Chain::process_approval` updates metrics related to the finality gadget.
                     // Don't send the approval if such an update failed
                     if let Ok(_) = self.client.chain.process_approval(
                         &self.client.validator_signer.as_ref().map(|x| x.validator_id().clone()),
-                        &approval,
+                        &approval_and_rand_reveals.approval,
                     ) {
-                        if let Err(e) = self.client.send_approval(approval) {
+                        if let Err(e) = self.client.send_approval(approval_and_rand_reveals) {
                             error!("Error while sending an approval {:?}", e);
                         }
                     }
@@ -1064,7 +1082,7 @@ impl ClientActor {
                             accepted_blocks.write().unwrap().drain(..).collect(),
                         );
                         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-                            self.client.shards_mgr.request_chunks(missing_chunks).unwrap();
+                            self.client.request_chunks(missing_chunks).unwrap();
                         }
 
                         self.client.sync_status =

@@ -3,9 +3,10 @@ use std::convert::TryFrom;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use near_primitives::block::Approval;
+use near_crypto::randomness::RandomShare;
+use near_primitives::block::{Approval, ApprovalAndRandRevealsRaw, ApprovalAndRandRevealsVerified};
 use near_primitives::hash::CryptoHash;
-use near_primitives::types::{AccountId, Balance, BlockHeight, BlockHeightDelta, ValidatorStake};
+use near_primitives::types::{AccountId, BlockHeight, BlockHeightDelta, NumSeats};
 use near_primitives::validator_signer::ValidatorSigner;
 
 /// Have that many iterations in the timer instead of `loop` to prevent potential bugs from blocking
@@ -20,7 +21,7 @@ const MAX_TIMER_ITERS: usize = 20;
 const MAX_HEIGHTS_AHEAD_TO_STORE_APPROVALS: BlockHeight = 10_000;
 
 /// The threshold for doomslug to create a block.
-/// `HalfStake` means the block can only be produced if at least half of the stake is approvign it,
+/// `HalfStake` means the block can only be produced if at least half of the seats are approvign it,
 ///             and is what should be used in production (and what guarantees doomslug finality)
 /// `NoApprovals` means the block production is not blocked on approvals. This is used
 ///             in many tests (e.g. `cross_shard_tx`) to create lots of forkfulness.
@@ -59,15 +60,17 @@ struct DoomslugTimer {
 struct DoomslugTip {
     block_hash: CryptoHash,
     reference_hash: Option<CryptoHash>,
+    rand_reveals: Vec<(NumSeats, RandomShare)>,
     height: BlockHeight,
 }
 
 struct DoomslugApprovalsTracker {
-    witness: HashMap<AccountId, Approval>,
-    account_id_to_stake: HashMap<AccountId, Balance>,
-    total_stake: Balance,
-    approved_stake: Balance,
-    endorsed_stake: Balance,
+    witness: HashMap<AccountId, ApprovalAndRandRevealsVerified>,
+    account_id_to_seats: HashMap<AccountId, NumSeats>,
+    total_seats: NumSeats,
+    approved_seats: NumSeats,
+    endorsed_seats: NumSeats,
+    seats_with_rand_reveal: NumSeats,
     time_passed_threshold: Option<Instant>,
     threshold_mode: DoomslugThresholdMode,
 }
@@ -132,25 +135,26 @@ impl DoomslugTimer {
 }
 
 impl DoomslugApprovalsTracker {
-    fn new(stakes: &Vec<ValidatorStake>, threshold_mode: DoomslugThresholdMode) -> Self {
-        let account_id_to_stake =
-            stakes.iter().map(|x| (x.account_id.clone(), x.stake)).collect::<HashMap<_, _>>();
-        assert!(account_id_to_stake.len() == stakes.len());
-        let total_stake = account_id_to_stake.values().sum::<Balance>();
+    fn new(
+        account_id_to_seats: HashMap<AccountId, NumSeats>,
+        threshold_mode: DoomslugThresholdMode,
+    ) -> Self {
+        let total_seats = account_id_to_seats.values().sum::<NumSeats>();
 
         DoomslugApprovalsTracker {
             witness: Default::default(),
-            account_id_to_stake,
-            total_stake,
-            approved_stake: 0,
-            endorsed_stake: 0,
+            account_id_to_seats,
+            total_seats,
+            approved_seats: 0,
+            endorsed_seats: 0,
+            seats_with_rand_reveal: 0,
             time_passed_threshold: None,
             threshold_mode,
         }
     }
 
     /// Given a single approval (either an endorsement or a skip-message) updates the approved
-    /// stake on the block that is being approved, and returns the largest threshold that is crossed
+    /// seats on the block that is being approved, and returns the largest threshold that is crossed
     /// This method only returns `ReadyToProduce` if the block has 2/3 approvals and 1/2 endorsements.
     /// The production readiness due to enough time passing since crossing the threshold should be
     /// handled by the caller.
@@ -158,6 +162,7 @@ impl DoomslugApprovalsTracker {
     /// # Arguments
     /// * now      - the current timestamp
     /// * approval - the approval to process
+    /// * rand_reveal - contributions to the randomness beacon
     ///
     /// # Returns
     /// `None` if the block doesn't have enough approvals yet to cross the doomslug threshold
@@ -168,26 +173,31 @@ impl DoomslugApprovalsTracker {
     fn process_approval(
         &mut self,
         now: Instant,
-        approval: &Approval,
+        approval_and_rand_reveals: ApprovalAndRandRevealsVerified,
     ) -> DoomslugBlockProductionReadiness {
-        let mut increment_approved_stake = false;
-        let mut increment_endorsed_stake = false;
-        self.witness.entry(approval.account_id.clone()).or_insert_with(|| {
-            increment_approved_stake = true;
+        let mut increment_approved_seats = false;
+        let mut increment_endorsed_seats = false;
+
+        let num_rand_reveals = approval_and_rand_reveals.rand_reveals.len() as u64;
+
+        let account_id = approval_and_rand_reveals.approval.account_id.clone();
+
+        self.witness.entry(account_id.clone()).or_insert_with(|| {
+            let approval = &approval_and_rand_reveals.approval;
+            increment_approved_seats = true;
             if approval.is_endorsement {
-                increment_endorsed_stake = true;
+                increment_endorsed_seats = true;
             }
-            approval.clone()
+            approval_and_rand_reveals
         });
 
-        if increment_approved_stake {
-            self.approved_stake +=
-                self.account_id_to_stake.get(&approval.account_id).map_or(0, |x| *x);
+        if increment_approved_seats {
+            self.approved_seats += self.account_id_to_seats.get(&account_id).map_or(0, |x| *x);
+            self.seats_with_rand_reveal += num_rand_reveals;
         }
 
-        if increment_endorsed_stake {
-            self.endorsed_stake +=
-                self.account_id_to_stake.get(&approval.account_id).map_or(0, |x| *x);
+        if increment_endorsed_seats {
+            self.endorsed_seats += self.account_id_to_seats.get(&account_id).map_or(0, |x| *x);
         }
 
         // We call to `get_block_production_readiness` here so that if the number of approvals crossed
@@ -197,18 +207,20 @@ impl DoomslugApprovalsTracker {
 
     /// Withdraws an approval. This happens if a newer approval for the same `target_height` comes
     /// from the same account. Removes the approval from the `witness` and updates approved and
-    /// endorsed stakes.
+    /// endorsed seats.
     fn withdraw_approval(&mut self, account_id: &AccountId) {
-        let approval = match self.witness.remove(account_id) {
-            None => return,
-            Some(approval) => approval,
-        };
+        let ApprovalAndRandRevealsVerified { approval, rand_reveals } =
+            match self.witness.remove(account_id) {
+                None => return,
+                Some(approval_and_rand_reveals) => approval_and_rand_reveals,
+            };
 
-        self.approved_stake -= self.account_id_to_stake.get(&approval.account_id).map_or(0, |x| *x);
+        self.approved_seats -= self.account_id_to_seats.get(&approval.account_id).map_or(0, |x| *x);
+        self.seats_with_rand_reveal -= rand_reveals.len() as u64;
 
         if approval.is_endorsement {
-            self.endorsed_stake -=
-                self.account_id_to_stake.get(&approval.account_id).map_or(0, |x| *x);
+            self.endorsed_seats -=
+                self.account_id_to_seats.get(&approval.account_id).map_or(0, |x| *x);
         }
     }
 
@@ -229,14 +241,14 @@ impl DoomslugApprovalsTracker {
     /// `ReadyToProduce` if the block can be produced bypassing the timeout (i.e. has 2/3+ of
     ///     approvals and 1/2+ of endorsements)
     fn get_block_production_readiness(&mut self, now: Instant) -> DoomslugBlockProductionReadiness {
-        if self.approved_stake > self.total_stake * 2 / 3
-            && self.endorsed_stake > self.total_stake / 2
+        if self.approved_seats > self.total_seats * 2 / 3
+            && self.endorsed_seats > self.total_seats / 2
         {
             if self.time_passed_threshold == None {
                 self.time_passed_threshold = Some(now);
             }
             DoomslugBlockProductionReadiness::ReadyToProduce(self.time_passed_threshold.unwrap())
-        } else if self.approved_stake > self.total_stake / 2
+        } else if self.approved_seats > self.total_seats / 2
             || self.threshold_mode == DoomslugThresholdMode::NoApprovals
         {
             if self.time_passed_threshold == None {
@@ -263,7 +275,9 @@ impl DoomslugApprovalsTrackersAtHeight {
     /// # Arguments
     /// * `now`      - the current timestamp
     /// * `approval` - the approval to be processed
-    /// * `stakes`   - all the stakes of all the block producers in the current epoch
+    /// * `rand_reveal` - contributions to the randomness beacon
+    /// * `account_id_to_seats` - a mapping from an account id to the number of seats they have in
+    ///                the epoch.
     /// * `threshold_mode` - how many approvals are needed to produce a block. Is used to compute
     ///                the return value
     ///
@@ -272,10 +286,11 @@ impl DoomslugApprovalsTrackersAtHeight {
     fn process_approval(
         &mut self,
         now: Instant,
-        approval: &Approval,
-        stakes: &Vec<ValidatorStake>,
+        approval_and_rand_reveals: ApprovalAndRandRevealsVerified,
+        account_id_to_seats: &HashMap<AccountId, NumSeats>,
         threshold_mode: DoomslugThresholdMode,
     ) -> DoomslugBlockProductionReadiness {
+        let approval = &approval_and_rand_reveals.approval;
         if let Some(last_parent_hash) = self.last_approval_per_account.get(&approval.account_id) {
             let should_remove = self
                 .approval_trackers
@@ -293,8 +308,10 @@ impl DoomslugApprovalsTrackersAtHeight {
         self.last_approval_per_account.insert(approval.account_id.clone(), approval.parent_hash);
         self.approval_trackers
             .entry(approval.parent_hash)
-            .or_insert_with(|| DoomslugApprovalsTracker::new(stakes, threshold_mode))
-            .process_approval(now, approval)
+            .or_insert_with(|| {
+                DoomslugApprovalsTracker::new(account_id_to_seats.clone(), threshold_mode)
+            })
+            .process_approval(now, approval_and_rand_reveals)
     }
 }
 
@@ -315,7 +332,12 @@ impl Doomslug {
             largest_endorsed_height: largest_previously_endorsed_height,
             largest_ds_final_height: 0,
             largest_threshold_height: 0,
-            tip: DoomslugTip { block_hash: CryptoHash::default(), reference_hash: None, height: 0 },
+            tip: DoomslugTip {
+                block_hash: CryptoHash::default(),
+                reference_hash: None,
+                rand_reveals: vec![],
+                height: 0,
+            },
             endorsement_pending: false,
             timer: DoomslugTimer {
                 started: Instant::now(),
@@ -375,10 +397,10 @@ impl Doomslug {
     /// * `cur_time` - is expected to receive `now`. Doesn't directly use `now` to simplify testing
     ///
     /// # Returns
-    /// A vector of approvals that need to be sent to other block producers as a result of processing
-    /// the timers
+    /// A vector of approvals and rand reveals that need to be sent to other block producers as a
+    /// result of processing the timers
     #[must_use]
-    pub fn process_timer(&mut self, cur_time: Instant) -> Vec<Approval> {
+    pub fn process_timer(&mut self, cur_time: Instant) -> Vec<ApprovalAndRandRevealsRaw> {
         let mut ret = vec![];
         for _ in 0..MAX_TIMER_ITERS {
             let skip_delay = self
@@ -402,7 +424,9 @@ impl Doomslug {
                     self.largest_endorsed_height = tip_height;
                 }
 
-                if let Some(approval) = self.create_approval(tip_height + 1, is_endorsement) {
+                if let Some(approval) =
+                    self.create_approval_and_rand_reveals(tip_height + 1, is_endorsement)
+                {
                     ret.push(approval);
                 }
 
@@ -418,8 +442,10 @@ impl Doomslug {
                     self.largest_promised_skip_height =
                         std::cmp::max(self.timer.height, self.largest_promised_skip_height);
 
-                    if let Some(approval) = self.create_approval(self.timer.height + 1, false) {
-                        ret.push(approval);
+                    if let Some(approval_and_rand_reveals) =
+                        self.create_approval_and_rand_reveals(self.timer.height + 1, false)
+                    {
+                        ret.push(approval_and_rand_reveals);
                     }
                 }
 
@@ -434,49 +460,73 @@ impl Doomslug {
         ret
     }
 
-    pub fn create_approval(
+    pub fn create_approval_and_rand_reveals(
         &self,
         target_height: BlockHeight,
         is_endorsement: bool,
-    ) -> Option<Approval> {
-        self.signer.as_ref().map(|signer| {
-            Approval::new(
+    ) -> Option<ApprovalAndRandRevealsRaw> {
+        self.signer.as_ref().map(|signer| ApprovalAndRandRevealsRaw {
+            approval: Approval::new(
                 self.tip.block_hash,
                 self.tip.reference_hash,
                 target_height,
                 is_endorsement,
                 &**signer,
-            )
+            ),
+            rand_reveals: self.tip.rand_reveals.clone(),
         })
     }
 
     /// Determines whether a block that precedes the block containing approvals has doomslug
-    /// finality, i.e. if the sum of stakes of block producers who produced endorsements (approvals
-    /// with `is_endorsed = true`) exceeds half of the total stake
+    /// finality, i.e. if the sum of seats of block producers who produced endorsements (approvals
+    /// with `is_endorsed = true`) exceeds half of the total seats
     ///
     /// # Arguments
     /// * `approvals` - the set of approvals in the current block
-    /// * `stakes`    - the vector of validator stakes in the current epoch
+    /// * `account_id_to_seats` - mapping of account ids to the number of seats they control
     pub fn is_approved_block_ds_final(
         approvals: &Vec<Approval>,
-        account_id_to_stake: &HashMap<AccountId, Balance>,
+        account_id_to_seats: &HashMap<AccountId, NumSeats>,
     ) -> bool {
-        let threshold = account_id_to_stake.values().sum::<Balance>() / 2;
+        let threshold = account_id_to_seats.values().sum::<NumSeats>() / 2;
 
-        let endorsed_stake = approvals
+        let endorsed_seats = approvals
             .iter()
             .map(|approval| {
-                { account_id_to_stake.get(&approval.account_id) }.map_or(0, |stake| {
+                { account_id_to_seats.get(&approval.account_id) }.map_or(0, |seats| {
                     if approval.is_endorsement {
-                        *stake
+                        *seats
                     } else {
                         0
                     }
                 })
             })
-            .sum::<Balance>();
+            .sum::<NumSeats>();
 
-        endorsed_stake > threshold
+        endorsed_seats > threshold
+    }
+
+    /// Converts a vector of `(Approval, Vec<(NumSeats, RandomShare)>)` into a vector of approvals,
+    /// and a vector of options of `RandomShare` indexed by the seat ordinal
+    fn convert_witness_to_approvals_and_rand_reveal(
+        witness: Vec<ApprovalAndRandRevealsVerified>,
+    ) -> (Vec<Approval>, Vec<Option<RandomShare>>) {
+        let (approvals, rand_reveals_unflattened): (
+            Vec<Approval>,
+            Vec<Vec<(NumSeats, RandomShare)>>,
+        ) = witness.into_iter().map(|x| (x.approval, x.rand_reveals)).unzip();
+
+        let mut rand_reveals = vec![];
+        for (seat_ord, rand_reveal) in rand_reveals_unflattened.into_iter().flatten() {
+            let seat_ord = seat_ord as usize;
+            while rand_reveals.len() <= seat_ord {
+                rand_reveals.push(None);
+            }
+
+            rand_reveals[seat_ord] = Some(rand_reveal);
+        }
+
+        (approvals, rand_reveals)
     }
 
     /// Determines whether the block `prev_hash` has doomslug finality from perspective of a block
@@ -484,7 +534,7 @@ impl Doomslug {
     /// Internally just pulls approvals from the `approval_tracking` and calls to
     /// `is_approved_block_ds_final`
     /// This method is presently only used by tests, and is not efficient (specifically, it
-    /// recomputes `endorsed_state` and `total_stake`, both of which are/can be maintained)
+    /// recomputes `endorsed_seats` and `total_seats`, both of which are/can be maintained)
     ///
     /// # Arguments
     /// * `prev_hash`     - the hash of the previous block (for which the ds finality is tested)
@@ -498,9 +548,14 @@ impl Doomslug {
             if let Some(approvals_tracker) =
                 approval_trackers_at_height.approval_trackers.get(&prev_hash)
             {
+                let approvals = approvals_tracker
+                    .witness
+                    .values()
+                    .map(|x| x.approval.clone())
+                    .collect::<Vec<_>>();
                 Doomslug::is_approved_block_ds_final(
-                    &approvals_tracker.witness.values().cloned().collect::<Vec<_>>(),
-                    &approvals_tracker.account_id_to_stake,
+                    &approvals,
+                    &approvals_tracker.account_id_to_seats,
                 )
             } else {
                 false
@@ -511,41 +566,52 @@ impl Doomslug {
     }
 
     /// Determines whether a block has enough approvals to be produced.
-    /// In production (with `mode == HalfStake`) we require the total stake of all the approvals to
-    /// be strictly more than half of the total stake. For many non-doomslug specific tests
+    /// In production (with `mode == HalfStake`) we require the total seats of all the approvals to
+    /// be strictly more than half of the total seats. For many non-doomslug specific tests
     /// (with `mode == NoApprovals`) no approvals are needed.
+    /// When doomslug is enabled, also checks if the block has enough random reveals, if necessary.
     ///
     /// # Arguments
-    /// * `mode`      - whether we want half of the total stake or just a single approval
+    /// * `mode`- whether we want half of the total seats or just a single approval
     /// * `approvals` - the set of approvals in the current block
-    /// * `stakes`    - the vector of validator stakes in the current epoch
+    /// * `rand_reveals` - the set of rand reveals from the current block
+    /// * `account_id_to_seats` - the mapping of account ids to the number of seats they control
+    /// * `need_random_value` - whether the randomness beacon is operational in the epoch (it can
+    ///                         be disabled, e.g. in the first epoch, or if the DKG failed)
     pub fn can_approved_block_be_produced(
         mode: DoomslugThresholdMode,
         approvals: &Vec<Approval>,
-        account_id_to_stake: &HashMap<AccountId, Balance>,
+        rand_reveals: &Vec<Option<RandomShare>>,
+        account_id_to_seats: &HashMap<AccountId, NumSeats>,
+        need_random_value: bool,
     ) -> bool {
         if mode == DoomslugThresholdMode::NoApprovals {
             return true;
         }
 
-        let threshold = account_id_to_stake.values().sum::<Balance>() / 2;
+        let threshold = account_id_to_seats.values().sum::<NumSeats>() / 2;
 
-        let approved_stake = approvals
+        let approved_seats = approvals
             .iter()
             .map(|approval| {
-                { account_id_to_stake.get(&approval.account_id) }.map_or(0, |stake| *stake)
+                { account_id_to_seats.get(&approval.account_id) }.map_or(0, |seats| *seats)
             })
-            .sum::<Balance>();
+            .sum::<NumSeats>();
 
-        approved_stake > threshold
+        let random_beacon_ok = !need_random_value
+            || (rand_reveals.iter().filter(|x| x.is_some()).count() as u64) > threshold;
+
+        random_beacon_ok && approved_seats > threshold
     }
 
     pub fn remove_witness(
         &mut self,
         prev_hash: &CryptoHash,
         target_height: BlockHeight,
-    ) -> Vec<Approval> {
-        if let Some(approval_trackers_at_height) = self.approval_tracking.get_mut(&target_height) {
+    ) -> (Vec<Approval>, Vec<Option<RandomShare>>) {
+        let witness = if let Some(approval_trackers_at_height) =
+            self.approval_tracking.get_mut(&target_height)
+        {
             let approvals_tracker = approval_trackers_at_height.approval_trackers.remove(prev_hash);
             match approvals_tracker {
                 None => vec![],
@@ -555,7 +621,9 @@ impl Doomslug {
             }
         } else {
             vec![]
-        }
+        };
+
+        Self::convert_witness_to_approvals_and_rand_reveal(witness)
     }
 
     /// Updates the current tip of the chain. Restarts the timer accordingly.
@@ -566,6 +634,8 @@ impl Doomslug {
     /// * `reference_hash` - is expected to come from the finality gadget and represents the
     ///                      reference hash (if any) to be included in the approvals being sent for
     ///                      this tip (whether endorsements or skip messages)
+    /// * `rand_reveals`   - the rand reveals to include into any approval send with the tip as the
+    ///                      parent hash.
     /// * `height`         - the height of the tip
     /// * `last_ds_final_height` - last height at which a block in this chain has doomslug finality
     pub fn set_tip(
@@ -573,10 +643,11 @@ impl Doomslug {
         now: Instant,
         block_hash: CryptoHash,
         reference_hash: Option<CryptoHash>,
+        rand_reveals: Vec<(NumSeats, RandomShare)>,
         height: BlockHeight,
         last_ds_final_height: BlockHeight,
     ) {
-        self.tip = DoomslugTip { block_hash, reference_hash, height };
+        self.tip = DoomslugTip { block_hash, reference_hash, rand_reveals, height };
 
         self.largest_ds_final_height = last_ds_final_height;
         self.timer.height = height + 1;
@@ -595,19 +666,20 @@ impl Doomslug {
     fn on_approval_message_internal(
         &mut self,
         now: Instant,
-        approval: &Approval,
-        stakes: &Vec<ValidatorStake>,
+        approval_and_rand_reveals: ApprovalAndRandRevealsVerified,
+        account_id_to_seats: &HashMap<AccountId, NumSeats>,
     ) -> DoomslugBlockProductionReadiness {
+        let target_height = approval_and_rand_reveals.approval.target_height;
         let threshold_mode = self.threshold_mode;
         let ret = self
             .approval_tracking
-            .entry(approval.target_height)
+            .entry(target_height)
             .or_insert_with(|| DoomslugApprovalsTrackersAtHeight::new())
-            .process_approval(now, approval, stakes, threshold_mode);
+            .process_approval(now, approval_and_rand_reveals, account_id_to_seats, threshold_mode);
 
         if ret != DoomslugBlockProductionReadiness::None {
-            if approval.target_height > self.largest_threshold_height {
-                self.largest_threshold_height = approval.target_height;
+            if target_height > self.largest_threshold_height {
+                self.largest_threshold_height = target_height;
             }
         }
 
@@ -618,16 +690,18 @@ impl Doomslug {
     pub fn on_approval_message(
         &mut self,
         now: Instant,
-        approval: &Approval,
-        stakes: &Vec<ValidatorStake>,
+        approval_and_rand_reveals: ApprovalAndRandRevealsVerified,
+        account_id_to_seats: &HashMap<AccountId, NumSeats>,
     ) {
+        let approval = &approval_and_rand_reveals.approval;
         if approval.target_height < self.tip.height
             || approval.target_height > self.tip.height + MAX_HEIGHTS_AHEAD_TO_STORE_APPROVALS
         {
             return;
         }
 
-        let _ = self.on_approval_message_internal(now, approval, stakes);
+        let _ =
+            self.on_approval_message_internal(now, approval_and_rand_reveals, account_id_to_seats);
     }
 
     /// Returns whether we can produce a block for this height. The check for whether `me` is the
@@ -639,23 +713,41 @@ impl Doomslug {
     ///    approvals for the first time, where h' is time since the last ds-final block.
     /// Only the height is passed into the function, we use the tip known to `Doomslug` as the
     /// parent hash.
+    /// If the random beacon output is needed, returns false if don't have enough random reveals
     ///
     /// # Arguments:
     /// * `now`               - current timestamp
     /// * `target_height`     - the height for which the readiness is checked
     /// * `has_enough_chunks` - if not, we will wait for T(h' / 6) even if we have 2/3 approvals &
     ///                         have the previous block ds-final.
+    /// * `need_random_value` - whether random reveals are needed
     #[must_use]
     pub fn ready_to_produce_block(
         &mut self,
         now: Instant,
         target_height: BlockHeight,
         has_enough_chunks: bool,
+        need_random_value: bool,
     ) -> bool {
         if let Some(approval_trackers_at_height) = self.approval_tracking.get_mut(&target_height) {
             if let Some(approval_tracker) =
                 approval_trackers_at_height.approval_trackers.get_mut(&self.tip.block_hash)
             {
+                // If we need the randomness beacon output, bail out immediately if don't have
+                // enough reveals, and the doomslug is enabled
+                if self.threshold_mode == DoomslugThresholdMode::HalfStake {
+                    if need_random_value
+                        && approval_tracker.seats_with_rand_reveal
+                            <= approval_tracker.total_seats / 2
+                    {
+                        return false;
+                    }
+                }
+
+                // If the randomness beacon output is not needed, it should not be possible to  have
+                // random reveals
+                debug_assert!(need_random_value || approval_tracker.seats_with_rand_reveal == 0);
+
                 let block_production_readiness =
                     approval_tracker.get_block_production_readiness(now);
                 match block_production_readiness {
@@ -690,13 +782,15 @@ impl Doomslug {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
     use std::sync::Arc;
     use std::time::{Duration, Instant};
 
-    use near_crypto::{KeyType, SecretKey};
-    use near_primitives::block::Approval;
+    use near_crypto::randomness::RandomShare;
+    use near_crypto::KeyType;
+    use near_primitives::block::{Approval, ApprovalAndRandRevealsVerified};
     use near_primitives::hash::hash;
-    use near_primitives::types::ValidatorStake;
+    use near_primitives::types::{AccountId, NumSeats};
     use near_primitives::validator_signer::InMemoryValidatorSigner;
 
     use crate::doomslug::{
@@ -720,19 +814,19 @@ mod tests {
         );
 
         // Set a new tip, must produce an endorsement
-        ds.set_tip(now, hash(&[1]), None, 1, 1);
+        ds.set_tip(now, hash(&[1]), None, vec![], 1, 1);
         assert_eq!(ds.process_timer(now + Duration::from_millis(399)).len(), 0);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[1]));
         assert_eq!(approval.target_height, 2);
         assert!(approval.is_endorsement);
 
         // Same tip => no endorsement, but still expect an approval (it is for the cases when a block
         // at lower height is received after a block at a higher height, e.g. due to finality gadget)
-        ds.set_tip(now, hash(&[1]), None, 1, 1);
+        ds.set_tip(now, hash(&[1]), None, vec![], 1, 1);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[1]));
         assert_eq!(approval.target_height, 2);
         assert!(!approval.is_endorsement);
@@ -744,9 +838,9 @@ mod tests {
         match ds.process_timer(now + Duration::from_millis(1000)) {
             approvals if approvals.len() == 0 => assert!(false),
             approvals => {
-                assert_eq!(approvals[0].parent_hash, hash(&[1]));
-                assert_eq!(approvals[0].target_height, 3);
-                assert!(!approvals[0].is_endorsement);
+                assert_eq!(approvals[0].approval.parent_hash, hash(&[1]));
+                assert_eq!(approvals[0].approval.target_height, 3);
+                assert!(!approvals[0].approval.is_endorsement);
             }
         }
 
@@ -754,9 +848,9 @@ mod tests {
         now += Duration::from_millis(1000);
 
         // Not processing a block at height 2 should not produce an endorsement (but still an approval)
-        ds.set_tip(now, hash(&[2]), None, 2, 1);
+        ds.set_tip(now, hash(&[2]), None, vec![], 2, 1);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[2]));
         assert_eq!(approval.target_height, 3);
         assert!(!approval.is_endorsement);
@@ -765,9 +859,9 @@ mod tests {
         now += Duration::from_millis(1000);
 
         // But at height 3 should (also neither block has ds_finality set, keep last ds_final at 1 for now)
-        ds.set_tip(now, hash(&[3]), None, 3, 1);
+        ds.set_tip(now, hash(&[3]), None, vec![], 3, 1);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[3]));
         assert_eq!(approval.target_height, 4);
         assert!(approval.is_endorsement);
@@ -780,9 +874,9 @@ mod tests {
         match ds.process_timer(now + Duration::from_millis(200)) {
             approvals if approvals.len() == 0 => assert!(false),
             approvals if approvals.len() == 1 => {
-                assert_eq!(approvals[0].parent_hash, hash(&[3]));
-                assert_eq!(approvals[0].target_height, 5);
-                assert!(!approvals[0].is_endorsement);
+                assert_eq!(approvals[0].approval.parent_hash, hash(&[3]));
+                assert_eq!(approvals[0].approval.target_height, 5);
+                assert!(!approvals[0].approval.is_endorsement);
             }
             _ => assert!(false),
         }
@@ -796,9 +890,9 @@ mod tests {
         match ds.process_timer(now + Duration::from_millis(500)) {
             approvals if approvals.len() == 0 => assert!(false),
             approvals => {
-                assert_eq!(approvals[0].parent_hash, hash(&[3]));
-                assert_eq!(approvals[0].target_height, 6);
-                assert!(!approvals[0].is_endorsement);
+                assert_eq!(approvals[0].approval.parent_hash, hash(&[3]));
+                assert_eq!(approvals[0].approval.target_height, 6);
+                assert!(!approvals[0].approval.is_endorsement);
             }
         }
 
@@ -811,9 +905,9 @@ mod tests {
         match ds.process_timer(now + Duration::from_millis(900)) {
             approvals if approvals.len() == 0 => assert!(false),
             approvals => {
-                assert_eq!(approvals[0].parent_hash, hash(&[3]));
-                assert_eq!(approvals[0].target_height, 7);
-                assert!(!approvals[0].is_endorsement);
+                assert_eq!(approvals[0].approval.parent_hash, hash(&[3]));
+                assert_eq!(approvals[0].approval.target_height, 7);
+                assert!(!approvals[0].approval.is_endorsement);
             }
         }
 
@@ -821,9 +915,9 @@ mod tests {
         now += Duration::from_millis(1000);
 
         // Accept block at 5 with ds finality, expect it to produce an approval, but not an endorsement
-        ds.set_tip(now, hash(&[5]), None, 5, 5);
+        ds.set_tip(now, hash(&[5]), None, vec![], 5, 5);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[5]));
         assert_eq!(approval.target_height, 6);
         assert!(!approval.is_endorsement);
@@ -837,9 +931,9 @@ mod tests {
         now += Duration::from_millis(17);
 
         // That approval should not be an endorsement, since we skipped 6
-        ds.set_tip(now, hash(&[6]), None, 6, 5);
+        ds.set_tip(now, hash(&[6]), None, vec![], 6, 5);
         let approval =
-            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap();
+            ds.process_timer(now + Duration::from_millis(400)).into_iter().nth(0).unwrap().approval;
         assert_eq!(approval.parent_hash, hash(&[6]));
         assert_eq!(approval.target_height, 7);
         assert!(!approval.is_endorsement);
@@ -851,31 +945,27 @@ mod tests {
         match ds.process_timer(now + Duration::from_millis(1100)) {
             approvals if approvals.len() == 0 => assert!(false),
             approvals => {
-                assert_eq!(approvals[0].parent_hash, hash(&[6]));
-                assert_eq!(approvals[0].target_height, 8);
-                assert!(!approvals[0].is_endorsement);
+                assert_eq!(approvals[0].approval.parent_hash, hash(&[6]));
+                assert_eq!(approvals[0].approval.target_height, 8);
+                assert!(!approvals[0].approval.is_endorsement);
             }
         }
     }
 
     #[test]
     fn test_doomslug_approvals() {
-        let accounts: Vec<(&str, u128)> =
+        let accounts: Vec<(&str, u64)> =
             vec![("test1", 2), ("test2", 1), ("test3", 3), ("test4", 2)];
-        let stakes = accounts
-            .iter()
-            .map(|(account_id, stake)| ValidatorStake {
-                account_id: account_id.to_string(),
-                stake: *stake,
-                public_key: SecretKey::from_seed(KeyType::ED25519, account_id).public_key(),
-            })
-            .collect::<Vec<_>>();
         let signers = accounts
             .iter()
             .map(|(account_id, _)| {
                 InMemoryValidatorSigner::from_seed(account_id, KeyType::ED25519, account_id)
             })
             .collect::<Vec<_>>();
+        let account_id_to_seats = accounts
+            .into_iter()
+            .map(|(s, i)| (s.to_string(), i))
+            .collect::<HashMap<AccountId, NumSeats>>();
 
         let signer = Arc::new(InMemoryValidatorSigner::from_seed("test", KeyType::ED25519, "test"));
         let mut ds = Doomslug::new(
@@ -899,8 +989,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 2, true, &signers[0]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 2, true, &signers[0],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::None,
         );
@@ -909,8 +1002,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 4, true, &signers[2]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 4, true, &signers[2],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::None,
         );
@@ -919,8 +1015,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 4, true, &signers[0]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 4, true, &signers[0],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::PassedThreshold(now),
         );
@@ -929,8 +1028,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now + Duration::from_millis(100),
-                &Approval::new(hash(&[1]), None, 4, true, &signers[0]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 4, true, &signers[0],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::PassedThreshold(now),
         );
@@ -939,8 +1041,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 4, true, &signers[3]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 4, true, &signers[3],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::ReadyToProduce(now),
         );
@@ -949,8 +1054,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 2, true, &signers[3]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 2, true, &signers[3],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::None,
         );
@@ -961,8 +1069,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[1]), None, 2, true, &signers[1]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[1]), None, 2, true, &signers[1],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::PassedThreshold(now),
         );
@@ -971,8 +1082,11 @@ mod tests {
         assert_eq!(
             ds.on_approval_message_internal(
                 now,
-                &Approval::new(hash(&[2]), None, 4, true, &signers[1]),
-                &stakes,
+                ApprovalAndRandRevealsVerified {
+                    approval: Approval::new(hash(&[2]), None, 4, true, &signers[1],),
+                    rand_reveals: vec![]
+                },
+                &account_id_to_seats,
             ),
             DoomslugBlockProductionReadiness::None,
         );
@@ -987,67 +1101,241 @@ mod tests {
                 InMemoryValidatorSigner::from_seed(account_id, KeyType::ED25519, account_id)
             })
             .collect::<Vec<_>>();
-        let stakes = accounts
+        let account_id_to_seats = accounts
             .into_iter()
-            .map(|(account_id, stake)| ValidatorStake {
-                account_id: account_id.to_string(),
-                stake,
-                public_key: SecretKey::from_seed(KeyType::ED25519, account_id).public_key(),
-            })
-            .collect::<Vec<_>>();
+            .map(|(s, i)| (s.to_string(), i))
+            .collect::<HashMap<AccountId, NumSeats>>();
+
         let mut tracker = DoomslugApprovalsTrackersAtHeight::new();
 
-        let a1_1 = Approval::new(hash(&[1]), None, 4, true, &signers[0]);
-        let a1_2 = Approval::new(hash(&[1]), None, 4, false, &signers[1]);
-        let a1_3 = Approval::new(hash(&[1]), None, 4, true, &signers[2]);
+        let a1_1 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[1]), None, 4, true, &signers[0]),
+            rand_reveals: vec![(1, RandomShare([0; 96]))],
+        };
+        let a1_2 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[1]), None, 4, false, &signers[1]),
+            rand_reveals: vec![],
+        };
+        let a1_3 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[1]), None, 4, true, &signers[2]),
+            rand_reveals: vec![],
+        };
 
-        let a2_1 = Approval::new(hash(&[2]), None, 4, true, &signers[0]);
-        let a2_2 = Approval::new(hash(&[2]), None, 4, false, &signers[1]);
-        let a2_3 = Approval::new(hash(&[2]), None, 4, true, &signers[2]);
+        let a2_1 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[2]), None, 4, true, &signers[0]),
+            rand_reveals: vec![],
+        };
+        let a2_2 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[2]), None, 4, false, &signers[1]),
+            rand_reveals: vec![],
+        };
+        let a2_3 = ApprovalAndRandRevealsVerified {
+            approval: Approval::new(hash(&[2]), None, 4, true, &signers[2]),
+            rand_reveals: vec![],
+        };
 
         // Process first approval, and then process it again and make sure it works
-        tracker.process_approval(Instant::now(), &a1_1, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a1_1.clone(),
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_stake, 2);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_stake, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_seats, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_seats, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().seats_with_rand_reveal, 1);
 
-        tracker.process_approval(Instant::now(), &a1_1, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a1_1,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_stake, 2);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_stake, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_seats, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_seats, 2);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().seats_with_rand_reveal, 1);
 
         // Process the remaining two approvals on the first block
-        tracker.process_approval(Instant::now(), &a1_2, &stakes, DoomslugThresholdMode::HalfStake);
-        tracker.process_approval(Instant::now(), &a1_3, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a1_2,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
+        tracker.process_approval(
+            Instant::now(),
+            a1_3,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_stake, 6);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_stake, 5);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_seats, 6);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_seats, 5);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().seats_with_rand_reveal, 1);
 
         // Process new approvals one by one, expect the approved and endorsed stake to slowly decrease
-        tracker.process_approval(Instant::now(), &a2_1, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a2_1,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_stake, 4);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_stake, 3);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_seats, 4);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_seats, 3);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().seats_with_rand_reveal, 0);
 
-        tracker.process_approval(Instant::now(), &a2_2, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a2_2,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_stake, 3);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_stake, 3);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().approved_seats, 3);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[1])).unwrap().endorsed_seats, 3);
 
         // As we update the last of the three approvals, the tracker for the first block should be completely removed
-        tracker.process_approval(Instant::now(), &a2_3, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a2_3.clone(),
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
         assert!(tracker.approval_trackers.get(&hash(&[1])).is_none());
 
         // Check the approved and endorsed stake for the new block, and also ensure that processing one of the same approvals
         // again works fine
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().approved_stake, 6);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().endorsed_stake, 5);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().approved_seats, 6);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().endorsed_seats, 5);
 
-        tracker.process_approval(Instant::now(), &a2_3, &stakes, DoomslugThresholdMode::HalfStake);
+        tracker.process_approval(
+            Instant::now(),
+            a2_3,
+            &account_id_to_seats,
+            DoomslugThresholdMode::HalfStake,
+        );
 
-        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().approved_stake, 6);
-        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().endorsed_stake, 5);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().approved_seats, 6);
+        assert_eq!(tracker.approval_trackers.get(&hash(&[2])).unwrap().endorsed_seats, 5);
+    }
+
+    /// Tests various cases of block production readiness from perspective of the randomness beacon
+    #[test]
+    fn test_rand_req() {
+        let accounts = vec![("test1", 2), ("test2", 1), ("test3", 3), ("test4", 2)];
+        let signers = accounts
+            .iter()
+            .map(|(account_id, _)| {
+                InMemoryValidatorSigner::from_seed(account_id, KeyType::ED25519, account_id)
+            })
+            .collect::<Vec<_>>();
+        let account_id_to_seats = accounts
+            .into_iter()
+            .map(|(s, i)| (s.to_string(), i))
+            .collect::<HashMap<AccountId, NumSeats>>();
+
+        let signer = Arc::new(InMemoryValidatorSigner::from_seed("test", KeyType::ED25519, "test"));
+
+        for with_rand_reveal_req in vec![false, true].into_iter() {
+            for send_third_approval in vec![false, true].into_iter() {
+                let mut ds = Doomslug::new(
+                    0,
+                    0,
+                    Duration::from_millis(400),
+                    Duration::from_millis(1000),
+                    Duration::from_millis(100),
+                    Duration::from_millis(3000),
+                    Some(signer.clone()),
+                    DoomslugThresholdMode::HalfStake,
+                );
+
+                let mut now = Instant::now();
+                ds.set_tip(now, hash(&[1]), None, vec![], 1, 1);
+
+                ds.on_approval_message(
+                    now,
+                    ApprovalAndRandRevealsVerified {
+                        approval: Approval::new(hash(&[1]), None, 2, true, &signers[2]),
+                        rand_reveals: if with_rand_reveal_req {
+                            vec![
+                                (1, RandomShare([0; 96])),
+                                (2, RandomShare([0; 96])),
+                                (3, RandomShare([0; 96])),
+                            ]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    &account_id_to_seats,
+                );
+
+                ds.on_approval_message(
+                    now,
+                    ApprovalAndRandRevealsVerified {
+                        approval: Approval::new(hash(&[1]), None, 2, true, &signers[3]),
+                        rand_reveals: if with_rand_reveal_req {
+                            vec![(4, RandomShare([0; 96]))]
+                        } else {
+                            vec![]
+                        },
+                    },
+                    &account_id_to_seats,
+                );
+
+                if send_third_approval {
+                    ds.on_approval_message(
+                        now,
+                        ApprovalAndRandRevealsVerified {
+                            approval: Approval::new(hash(&[1]), None, 2, true, &signers[1]),
+                            rand_reveals: if with_rand_reveal_req {
+                                vec![(5, RandomShare([0; 96]))]
+                            } else {
+                                vec![]
+                            },
+                        },
+                        &account_id_to_seats,
+                    );
+                }
+
+                now += Duration::from_secs(100);
+
+                // In the mode in which only two approvals are sent, there are 5 seats approving,
+                // but only four random reveals in the rand reveal mode. Thus in the rand reveal
+                // mode the block production is not ready yet.
+                if with_rand_reveal_req {
+                    assert_eq!(send_third_approval, ds.ready_to_produce_block(now, 2, true, true));
+                } else {
+                    assert!(ds.ready_to_produce_block(now, 2, true, false));
+                }
+
+                let (approvals, rand_reveal) = ds.remove_witness(&hash(&[1]), 2);
+
+                if with_rand_reveal_req {
+                    assert_eq!(
+                        send_third_approval,
+                        Doomslug::can_approved_block_be_produced(
+                            DoomslugThresholdMode::HalfStake,
+                            &approvals,
+                            &rand_reveal,
+                            &account_id_to_seats,
+                            true
+                        )
+                    );
+                } else {
+                    assert!(Doomslug::can_approved_block_be_produced(
+                        DoomslugThresholdMode::HalfStake,
+                        &approvals,
+                        &rand_reveal,
+                        &account_id_to_seats,
+                        false
+                    ));
+                }
+            }
+        }
     }
 }

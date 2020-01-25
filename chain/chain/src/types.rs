@@ -16,13 +16,17 @@ use near_primitives::receipt::Receipt;
 use near_primitives::sharding::{ReceiptProof, ShardChunk, ShardChunkHeader};
 use near_primitives::transaction::{ExecutionOutcomeWithId, SignedTransaction};
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, EpochId, Gas, MerkleHash, ShardId, StateChanges,
-    StateChangesRequest, StateRoot, StateRootNode, ValidatorStake, ValidatorStats,
+    AccountId, Balance, BlockHeight, BlockHeightDelta, EpochId, Gas, MerkleHash, NumSeats, ShardId,
+    StateChanges, StateChangesRequest, StateRoot, StateRootNode, ValidatorStake, ValidatorStats,
 };
 use near_primitives::views::{EpochValidatorInfo, QueryRequest, QueryResponse};
 use near_store::{PartialStorage, StoreUpdate, WrappedTrieChanges};
 
 use crate::error::Error;
+use near_primitives::randomness::{
+    BlockRandomnessDKGCommitmentInfo, BlockRandomnessDKGInfo, ChunkRandomnessDkgInfoHeader,
+    RandomnessDKGPhase,
+};
 
 #[derive(PartialEq, Eq, Clone, Debug, BorshSerialize, BorshDeserialize, Serialize)]
 pub struct ReceiptResponse(pub CryptoHash, pub Vec<Receipt>);
@@ -152,6 +156,9 @@ pub trait RuntimeAdapter: Send + Sync {
         chain_validate: &mut dyn FnMut(&SignedTransaction) -> bool,
     ) -> Result<Vec<SignedTransaction>, Error>;
 
+    /// Returns the expected length of the epoch, in number of heights
+    fn get_epoch_length(&self) -> BlockHeightDelta;
+
     /// Verify validator signature for the given epoch.
     /// Note: doesnt't account for slashed accounts within given epoch. USE WITH CAUTION.
     fn verify_validator_signature(
@@ -244,6 +251,11 @@ pub trait RuntimeAdapter: Send + Sync {
 
     /// Returns `account_id` that suppose to have the `part_id` of all chunks given previous block hash.
     fn get_part_owner(&self, parent_hash: &CryptoHash, part_id: u64) -> Result<AccountId, Error>;
+    fn get_next_epoch_part_owner(
+        &self,
+        parent_hash: &CryptoHash,
+        part_id: u64,
+    ) -> Result<AccountId, Error>;
 
     /// Whether the client cares about some shard right now.
     /// * If `account_id` is None, `is_me` is not checked and the
@@ -302,6 +314,7 @@ pub trait RuntimeAdapter: Send + Sync {
         current_hash: CryptoHash,
         height: BlockHeight,
         last_finalized_height: BlockHeight,
+        is_dkg_in_progress: bool,
         proposals: Vec<ValidatorStake>,
         slashed_validators: Vec<SlashedValidator>,
         validator_mask: Vec<bool>,
@@ -445,6 +458,156 @@ pub trait RuntimeAdapter: Send + Sync {
                 .push(hash(&ReceiptList(shard_id, shard_receipts).try_to_vec().unwrap()));
         }
         receipts_hashes
+    }
+
+    /// Returns a unique ordinal of a block producer within the epoch
+    fn get_block_producer_ordinal(
+        &self,
+        epoch_id: &EpochId,
+        last_known_hash: &CryptoHash,
+        account_id: &AccountId,
+    ) -> Result<Option<usize>, Error> {
+        for (ordinal, (validator_stake, _)) in
+            self.get_epoch_block_producers_ordered(epoch_id, last_known_hash)?.iter().enumerate()
+        {
+            if &validator_stake.account_id == account_id {
+                return Ok(Some(ordinal));
+            }
+        }
+
+        Ok(None)
+    }
+
+    fn get_block_dkg_phase(&self, block: &Block) -> Result<RandomnessDKGPhase, Error> {
+        Ok(block.dkg_info.compute_phase(
+            self.get_epoch_length(),
+            block.header.inner_lite.height - self.get_epoch_start_height(&block.hash())?,
+            self.num_total_parts() as NumSeats,
+        ))
+    }
+
+    /// Computes the new DKG info to be included into the next block.
+    ///
+    /// # Arguments
+    /// * `prev_block`      - the reference to the previous block
+    /// * `block_height`    - the height of the block to be produced (is needed to compute the phase)
+    /// * `chunks`          - all the chunks to be included into the new block
+    fn compute_new_dkg_info(
+        &self,
+        prev_block: &Block,
+        block_height: BlockHeight,
+        chunks: &Vec<ShardChunkHeader>,
+    ) -> Result<BlockRandomnessDKGInfo, Error> {
+        // Compute the new DKG info
+        let prev_dkg_phase = self.get_block_dkg_phase(&prev_block)?;
+        let prev_hash = prev_block.hash();
+        let is_epoch_switch = prev_block.header.inner_lite.epoch_id
+            != self.get_epoch_id_from_prev_block(&prev_hash)?;
+
+        if is_epoch_switch {
+            assert_eq!(prev_dkg_phase, RandomnessDKGPhase::Completed);
+        }
+
+        let mut new_dkg_info = prev_block.dkg_info.clone();
+
+        match prev_dkg_phase {
+            RandomnessDKGPhase::Commit => {
+                for (shard_id, chunk) in chunks.iter().enumerate() {
+                    if chunk.height_included == block_height {
+                        let shard_id = shard_id as ShardId;
+
+                        if let ChunkRandomnessDkgInfoHeader::Commit {
+                            pk_merkle_root,
+                            sk_merkle_root,
+                        } = chunk.inner.shard_dkg_info_header
+                        {
+                            let epoch_id = self.get_epoch_id_from_prev_block(&prev_hash)?;
+                            let bp = self.get_chunk_producer(
+                                &epoch_id,
+                                chunk.inner.height_created,
+                                shard_id,
+                            )?;
+                            if let Some(bp_ordinal) =
+                                self.get_block_producer_ordinal(&epoch_id, &prev_hash, &bp)?
+                            {
+                                while new_dkg_info.commitment_infos.len() <= bp_ordinal {
+                                    new_dkg_info.commitment_infos.push(Default::default());
+                                }
+                                if new_dkg_info.commitment_infos[bp_ordinal].is_none() {
+                                    new_dkg_info.commitment_infos[bp_ordinal] =
+                                        Some(BlockRandomnessDKGCommitmentInfo {
+                                            shard_id,
+                                            public_shares_merkle_root: pk_merkle_root,
+                                            secret_shares_merkle_root: sk_merkle_root,
+                                            was_challenged: false,
+                                        });
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            RandomnessDKGPhase::Challenge => {}
+            RandomnessDKGPhase::Aggregate(next_ordinal) => {
+                if chunks.iter().all(|chunk| {
+                    if let ChunkRandomnessDkgInfoHeader::Aggregate { ordinal, .. } =
+                        chunk.inner.shard_dkg_info_header
+                    {
+                        ordinal == next_ordinal
+                    } else {
+                        false
+                    }
+                }) {
+                    let empty_vec = vec![];
+                    new_dkg_info.aggregate(
+                        &chunks
+                            .iter()
+                            .map(|chunk| {
+                                if let ChunkRandomnessDkgInfoHeader::Aggregate { values, .. } =
+                                    &chunk.inner.shard_dkg_info_header
+                                {
+                                    values
+                                } else {
+                                    debug_assert!(false);
+                                    &empty_vec
+                                }
+                            })
+                            .flatten()
+                            .collect(),
+                    );
+                }
+            }
+            RandomnessDKGPhase::Completed => {}
+        };
+
+        if is_epoch_switch {
+            new_dkg_info = BlockRandomnessDKGInfo {
+                this_epoch_shares: new_dkg_info.next_epoch_aggregated_shares,
+                commitment_infos: vec![],
+                next_epoch_aggregated_shares: vec![],
+            };
+        }
+
+        Ok(new_dkg_info)
+    }
+
+    /// Returns a hashmap that maps account ids of block producers in a given epoch to the number
+    /// of seats they control
+    ///
+    /// # Arguments
+    /// * `parent_hash` - the mapping will be returned for the epoch of a block that builds on top
+    ///                   of `parent_hash`
+    fn get_block_producers_to_seats_mapping(
+        &self,
+        parent_hash: &CryptoHash,
+    ) -> Result<HashMap<AccountId, NumSeats>, Error> {
+        let mut ret = HashMap::new();
+
+        for part_ord in 0..self.num_total_parts() {
+            *ret.entry(self.get_part_owner(parent_hash, part_ord as NumSeats)?).or_insert(0) += 1;
+        }
+
+        Ok(ret)
     }
 }
 

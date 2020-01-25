@@ -10,6 +10,7 @@ pub enum Error {
     DuplicateChunkHeight,
     UnknownChunk,
     KnownPart,
+    DkgError,
     ChainError(near_chain::Error),
     IOError(std::io::Error),
 }

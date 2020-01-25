@@ -1,8 +1,13 @@
 use std::path::Path;
 use std::sync::Arc;
 
+use crate::key_conversion::convert_secret_key;
 use crate::key_file::KeyFile;
+use crate::randomness::{
+    DecryptedShare, DecryptionFailureProof, EncryptedShare, ValidatedPublicShares,
+};
 use crate::{KeyType, PublicKey, SecretKey, Signature};
+use curve25519_dalek::ristretto::CompressedRistretto;
 
 /// Generic signer trait, that can sign with some subset of supported curves.
 pub trait Signer: Sync + Send {
@@ -12,6 +17,12 @@ pub trait Signer: Sync + Send {
     fn verify(&self, data: &[u8], signature: &Signature) -> bool {
         signature.verify(data, &self.public_key())
     }
+
+    fn decode_share(
+        &self,
+        encrypted_secret_share: &EncryptedShare,
+        public_share: &[u8; 32], // compressed ristretto point
+    ) -> Result<DecryptedShare, DecryptionFailureProof>;
 
     /// Used by test infrastructure, only implement if make sense for testing otherwise raise `unimplemented`.
     fn write_to_file(&self, _path: &Path) {
@@ -29,6 +40,14 @@ impl Signer for EmptySigner {
 
     fn sign(&self, _data: &[u8]) -> Signature {
         Signature::empty(KeyType::ED25519)
+    }
+
+    fn decode_share(
+        &self,
+        _encrypted_secret_share: &EncryptedShare,
+        _public_share: &[u8; 32],
+    ) -> Result<DecryptedShare, DecryptionFailureProof> {
+        unimplemented!()
     }
 }
 
@@ -62,6 +81,20 @@ impl Signer for InMemorySigner {
 
     fn sign(&self, data: &[u8]) -> Signature {
         self.secret_key.sign(data)
+    }
+
+    fn decode_share(
+        &self,
+        encrypted_secret_share: &EncryptedShare,
+        public_share: &[u8; 32],
+    ) -> Result<DecryptedShare, DecryptionFailureProof> {
+        ValidatedPublicShares::try_decrypt_static(
+            CompressedRistretto(*public_share)
+                .decompress()
+                .expect("Cannot decompress compressed point"),
+            encrypted_secret_share,
+            &convert_secret_key(&self.secret_key.unwrap_as_ed25519()),
+        )
     }
 
     fn write_to_file(&self, path: &Path) {

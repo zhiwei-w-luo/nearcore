@@ -8,10 +8,12 @@ use cached::{Cached, SizedCache};
 use chrono::Utc;
 use serde::Serialize;
 
+use near_crypto::randomness::CompressedShare;
 use near_primitives::block::{Approval, BlockScore};
 use near_primitives::errors::InvalidTxError;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::MerklePath;
+use near_primitives::randomness::DkgValidatedPublicSharesCompressed;
 use near_primitives::receipt::Receipt;
 use near_primitives::sharding::{
     ChunkHash, EncodedShardChunk, PartialEncodedChunk, ReceiptProof, ShardChunk, ShardChunkHeader,
@@ -20,16 +22,17 @@ use near_primitives::transaction::{
     ExecutionOutcomeWithId, ExecutionOutcomeWithIdAndProof, SignedTransaction,
 };
 use near_primitives::types::{
-    AccountId, BlockExtra, BlockHeight, ChunkExtra, EpochId, NumBlocks, ShardId, StateChangeCause,
-    StateChanges, StateChangesRequest,
+    AccountId, BlockExtra, BlockHeight, ChunkExtra, EpochId, MerkleHash, NumBlocks, ShardId,
+    StateChangeCause, StateChanges, StateChangesRequest,
 };
 use near_primitives::utils::{index_to_bytes, to_timestamp};
 use near_primitives::views::LightClientBlockView;
 use near_store::{
     read_with_cache, ColBlock, ColBlockExtra, ColBlockHeader, ColBlockHeight, ColBlockMisc,
     ColBlockPerHeight, ColBlocksToCatchup, ColChallengedBlocks, ColChunkExtra,
-    ColChunkPerHeightShard, ColChunks, ColEpochLightClientBlocks, ColIncomingReceipts,
-    ColInvalidChunks, ColKeyValueChanges, ColLastApprovalPerAccount, ColLastBlockWithNewChunk,
+    ColChunkPerHeightShard, ColChunks, ColDkgAggregatedSecretShares, ColDkgCommittedPublicShares,
+    ColDkgRawSecretShares, ColEpochLightClientBlocks, ColIncomingReceipts, ColInvalidChunks,
+    ColKeyValueChanges, ColLastApprovalPerAccount, ColLastBlockWithNewChunk,
     ColMyLastApprovalsPerChain, ColNextBlockHashes, ColNextBlockWithNewChunk, ColOutgoingReceipts,
     ColPartialChunks, ColReceiptIdToShardId, ColStateDlInfos, ColTransactionResult,
     ColTransactions, Store, StoreUpdate, WrappedTrieChanges,
@@ -62,10 +65,36 @@ fn get_block_shard_id(block_hash: &CryptoHash, shard_id: ShardId) -> Vec<u8> {
     res
 }
 
+fn get_merkle_root_part_ord(merkle_root: &MerkleHash, part_ord: u64) -> Vec<u8> {
+    let mut res = Vec::with_capacity(40);
+    res.extend_from_slice(merkle_root.as_ref());
+    res.extend_from_slice(&part_ord.to_le_bytes());
+    res
+}
+
+fn get_epoch_id_part_ord(epoch_id: &EpochId, part_ord: u64) -> Vec<u8> {
+    let mut res = Vec::with_capacity(40);
+    res.extend_from_slice(epoch_id.0.as_ref());
+    res.extend_from_slice(&part_ord.to_le_bytes());
+    res
+}
+
 fn get_height_shard_id(height: BlockHeight, shard_id: ShardId) -> Vec<u8> {
     let mut res = Vec::with_capacity(40);
     res.extend_from_slice(&height.to_le_bytes());
     res.extend_from_slice(&shard_id.to_le_bytes());
+    res
+}
+
+fn get_dkg_shares_key(
+    epoch_id: &CryptoHash,
+    producer_ordinal: u64,
+    merkle_root: &CryptoHash,
+) -> Vec<u8> {
+    let mut res = Vec::with_capacity(72);
+    res.extend_from_slice(epoch_id.as_ref());
+    res.extend_from_slice(&producer_ordinal.to_le_bytes());
+    res.extend_from_slice(merkle_root.as_ref());
     res
 }
 
@@ -335,6 +364,28 @@ pub trait ChainStoreAccess {
         block_hash: &CryptoHash,
         state_changes_request: &StateChangesRequest,
     ) -> Result<StateChanges, Error>;
+
+    fn get_dkg_committed_public_shares(
+        &mut self,
+        epoch_id: &EpochId,
+        producer_ordinal: u64,
+        merkle_root: &CryptoHash,
+    ) -> Result<&DkgValidatedPublicSharesCompressed, Error>;
+
+    /// Returns a secret share before aggregation (the key is the merkle root of secret shares
+    /// from a particular block producer)
+    fn get_dkg_raw_secret_share(
+        &mut self,
+        merkle_root: &MerkleHash,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error>;
+
+    /// Returns an aggregated secret share for a particular epoch
+    fn get_dkg_aggregated_secret_share(
+        &mut self,
+        epoch_id: &EpochId,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error>;
 }
 
 /// All chain-related database operations.
@@ -387,6 +438,9 @@ pub struct ChainStore {
     last_block_with_new_chunk: SizedCache<Vec<u8>, CryptoHash>,
     /// Transactions
     transactions: SizedCache<Vec<u8>, SignedTransaction>,
+    dkg_committed_public_shares: SizedCache<Vec<u8>, DkgValidatedPublicSharesCompressed>,
+    dkg_raw_secret_shares: SizedCache<Vec<u8>, CompressedShare>,
+    dkg_aggregated_secret_shares: SizedCache<Vec<u8>, CompressedShare>,
 }
 
 pub fn option_to_not_found<T>(res: io::Result<Option<T>>, field_name: &str) -> Result<T, Error> {
@@ -424,6 +478,9 @@ impl ChainStore {
             next_block_with_new_chunk: SizedCache::with_size(CHUNK_CACHE_SIZE),
             last_block_with_new_chunk: SizedCache::with_size(CHUNK_CACHE_SIZE),
             transactions: SizedCache::with_size(CHUNK_CACHE_SIZE),
+            dkg_committed_public_shares: SizedCache::with_size(CACHE_SIZE),
+            dkg_raw_secret_shares: SizedCache::with_size(CACHE_SIZE),
+            dkg_aggregated_secret_shares: SizedCache::with_size(CACHE_SIZE),
         }
     }
 
@@ -968,6 +1025,58 @@ impl ChainStoreAccess for ChainStore {
         }
         Ok(changes)
     }
+
+    fn get_dkg_committed_public_shares(
+        &mut self,
+        epoch_id: &EpochId,
+        producer_ordinal: u64,
+        merkle_root: &CryptoHash,
+    ) -> Result<&DkgValidatedPublicSharesCompressed, Error> {
+        option_to_not_found(
+            read_with_cache(
+                &*self.store,
+                ColDkgCommittedPublicShares,
+                &mut self.dkg_committed_public_shares,
+                &get_dkg_shares_key(&epoch_id.0, producer_ordinal, merkle_root),
+            ),
+            &format!(
+                "DKG_COMMITTED_PUBLIC_SHARES: {}:{}:{}",
+                epoch_id.0, producer_ordinal, merkle_root
+            ),
+        )
+    }
+
+    fn get_dkg_raw_secret_share(
+        &mut self,
+        merkle_root: &MerkleHash,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error> {
+        option_to_not_found(
+            read_with_cache(
+                &*self.store,
+                ColDkgRawSecretShares,
+                &mut self.dkg_raw_secret_shares,
+                &get_merkle_root_part_ord(merkle_root, part_ord),
+            ),
+            &format!("DKG RAW SECRET SHARES: {}:{}", merkle_root, part_ord),
+        )
+    }
+
+    fn get_dkg_aggregated_secret_share(
+        &mut self,
+        epoch_id: &EpochId,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error> {
+        option_to_not_found(
+            read_with_cache(
+                &*self.store,
+                ColDkgAggregatedSecretShares,
+                &mut self.dkg_aggregated_secret_shares,
+                &get_epoch_id_part_ord(epoch_id, part_ord),
+            ),
+            &format!("DKG AGGREGATED SECRET SHARES: {}:{}", epoch_id.0, part_ord),
+        )
+    }
 }
 
 /// Cache update for ChainStore
@@ -993,6 +1102,10 @@ struct ChainStoreCacheUpdate {
     next_block_with_new_chunk: HashMap<(CryptoHash, ShardId), CryptoHash>,
     last_block_with_new_chunk: HashMap<ShardId, CryptoHash>,
     transactions: HashSet<SignedTransaction>,
+    dkg_committed_public_shares:
+        HashMap<(EpochId, u64, CryptoHash), DkgValidatedPublicSharesCompressed>,
+    dkg_raw_secret_shares: HashMap<(MerkleHash, u64), CompressedShare>,
+    dkg_aggregated_secret_shares: HashMap<(EpochId, u64), CompressedShare>,
 }
 
 impl ChainStoreCacheUpdate {
@@ -1019,6 +1132,9 @@ impl ChainStoreCacheUpdate {
             next_block_with_new_chunk: Default::default(),
             last_block_with_new_chunk: Default::default(),
             transactions: Default::default(),
+            dkg_committed_public_shares: Default::default(),
+            dkg_raw_secret_shares: Default::default(),
+            dkg_aggregated_secret_shares: Default::default(),
         }
     }
 }
@@ -1453,6 +1569,57 @@ impl<'a> ChainStoreAccess for ChainStoreUpdate<'a> {
     ) -> Result<StateChanges, Error> {
         self.chain_store.get_key_value_changes(block_hash, state_changes_request)
     }
+
+    fn get_dkg_committed_public_shares(
+        &mut self,
+        epoch_id: &EpochId,
+        producer_ordinal: u64,
+        merkle_root: &CryptoHash,
+    ) -> Result<&DkgValidatedPublicSharesCompressed, Error> {
+        if let Some(dkg_public_shares) = self
+            .chain_store_cache_update
+            .dkg_committed_public_shares
+            .get(&(epoch_id.clone(), producer_ordinal, *merkle_root))
+        {
+            Ok(dkg_public_shares)
+        } else {
+            self.chain_store.get_dkg_committed_public_shares(
+                epoch_id,
+                producer_ordinal,
+                merkle_root,
+            )
+        }
+    }
+
+    fn get_dkg_raw_secret_share(
+        &mut self,
+        merkle_root: &MerkleHash,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error> {
+        if let Some(dkg_raw_secret_share) =
+            self.chain_store_cache_update.dkg_raw_secret_shares.get(&(*merkle_root, part_ord))
+        {
+            Ok(dkg_raw_secret_share)
+        } else {
+            self.chain_store.get_dkg_raw_secret_share(merkle_root, part_ord)
+        }
+    }
+
+    fn get_dkg_aggregated_secret_share(
+        &mut self,
+        epoch_id: &EpochId,
+        part_ord: u64,
+    ) -> Result<&CompressedShare, Error> {
+        if let Some(dkg_aggregated_secret_share) = self
+            .chain_store_cache_update
+            .dkg_aggregated_secret_shares
+            .get(&(epoch_id.clone(), part_ord))
+        {
+            Ok(dkg_aggregated_secret_share)
+        } else {
+            self.chain_store.get_dkg_aggregated_secret_share(epoch_id, part_ord)
+        }
+    }
 }
 
 impl<'a> ChainStoreUpdate<'a> {
@@ -1846,6 +2013,40 @@ impl<'a> ChainStoreUpdate<'a> {
         Ok(())
     }
 
+    pub fn save_dkg_committed_public_shares(
+        &mut self,
+        epoch_id: &EpochId,
+        producer_ordinal: u64,
+        merkle_root: &CryptoHash,
+        dkg_public_shares: DkgValidatedPublicSharesCompressed,
+    ) {
+        self.chain_store_cache_update
+            .dkg_committed_public_shares
+            .insert((epoch_id.clone(), producer_ordinal, *merkle_root), dkg_public_shares);
+    }
+
+    pub fn save_dkg_raw_secret_share(
+        &mut self,
+        merkle_root: &MerkleHash,
+        part_ord: u64,
+        raw_secret_share: CompressedShare,
+    ) {
+        self.chain_store_cache_update
+            .dkg_raw_secret_shares
+            .insert((merkle_root.clone(), part_ord), raw_secret_share);
+    }
+
+    pub fn save_dkg_aggregated_secret_share(
+        &mut self,
+        epoch_id: &EpochId,
+        part_ord: u64,
+        aggregated_secret_share: CompressedShare,
+    ) {
+        self.chain_store_cache_update
+            .dkg_aggregated_secret_shares
+            .insert((epoch_id.clone(), part_ord), aggregated_secret_share);
+    }
+
     /// Merge another StoreUpdate into this one
     pub fn merge(&mut self, store_update: StoreUpdate) {
         self.store_updates.push(store_update);
@@ -2015,6 +2216,33 @@ impl<'a> ChainStoreUpdate<'a> {
         for transaction in self.chain_store_cache_update.transactions.iter() {
             store_update.set_ser(ColTransactions, transaction.get_hash().as_ref(), transaction)?;
         }
+        for ((epoch_id, producer_ordinal, merkle_root), dkg_public_shares) in
+            self.chain_store_cache_update.dkg_committed_public_shares.iter()
+        {
+            store_update.set_ser(
+                ColDkgCommittedPublicShares,
+                &get_dkg_shares_key(&epoch_id.0, *producer_ordinal, merkle_root),
+                dkg_public_shares,
+            )?;
+        }
+        for ((merkle_root, part_ord), raw_secret_share) in
+            self.chain_store_cache_update.dkg_raw_secret_shares.iter()
+        {
+            store_update.set_ser(
+                ColDkgRawSecretShares,
+                &get_merkle_root_part_ord(merkle_root, *part_ord),
+                raw_secret_share,
+            )?;
+        }
+        for ((epoch_id, part_ord), aggregated_secret_share) in
+            self.chain_store_cache_update.dkg_aggregated_secret_shares.iter()
+        {
+            store_update.set_ser(
+                ColDkgAggregatedSecretShares,
+                &get_epoch_id_part_ord(epoch_id, *part_ord),
+                aggregated_secret_share,
+            )?;
+        }
         for trie_changes in self.trie_changes.drain(..) {
             trie_changes
                 .insertions_into(&mut store_update)
@@ -2129,6 +2357,9 @@ impl<'a> ChainStoreUpdate<'a> {
             next_block_with_new_chunk,
             last_block_with_new_chunk,
             transactions,
+            dkg_committed_public_shares,
+            dkg_raw_secret_shares,
+            dkg_aggregated_secret_shares,
         } = self.chain_store_cache_update;
         for (hash, block) in blocks {
             self.chain_store.blocks.cache_set(hash.into(), block);
@@ -2209,6 +2440,22 @@ impl<'a> ChainStoreUpdate<'a> {
         }
         for transaction in transactions {
             self.chain_store.transactions.cache_set(transaction.get_hash().into(), transaction);
+        }
+        for ((epoch_id, producer_ordinal, merkle_root), dkg_public_shares) in
+            dkg_committed_public_shares
+        {
+            let key = get_dkg_shares_key(&epoch_id.0, producer_ordinal, &merkle_root);
+            self.chain_store.dkg_committed_public_shares.cache_set(key, dkg_public_shares);
+        }
+        for ((merkle_root, part_ord), raw_secret_share) in dkg_raw_secret_shares {
+            self.chain_store
+                .dkg_raw_secret_shares
+                .cache_set(get_merkle_root_part_ord(&merkle_root, part_ord), raw_secret_share);
+        }
+        for ((epoch_id, part_ord), aggregated_secret_share) in dkg_aggregated_secret_shares {
+            self.chain_store
+                .dkg_aggregated_secret_shares
+                .cache_set(get_epoch_id_part_ord(&epoch_id, part_ord), aggregated_secret_share);
         }
 
         Ok(())

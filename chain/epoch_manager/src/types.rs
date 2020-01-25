@@ -71,6 +71,7 @@ pub struct EpochInfo {
 pub struct BlockInfo {
     pub height: BlockHeight,
     pub last_finalized_height: BlockHeight,
+    pub is_dkg_in_progress: bool,
     pub prev_hash: CryptoHash,
     pub epoch_first_block: CryptoHash,
     pub epoch_id: EpochId,
@@ -93,6 +94,7 @@ impl BlockInfo {
     pub fn new(
         height: BlockHeight,
         last_finalized_height: BlockHeight,
+        is_dkg_in_progress: bool,
         prev_hash: CryptoHash,
         proposals: Vec<ValidatorStake>,
         validator_mask: Vec<bool>,
@@ -104,6 +106,7 @@ impl BlockInfo {
         Self {
             height,
             last_finalized_height,
+            is_dkg_in_progress,
             prev_hash,
             proposals,
             chunk_mask: validator_mask,

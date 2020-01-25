@@ -287,6 +287,7 @@ mod tests {
                 BlockInfo::new(
                     height,
                     0,
+                    false,
                     prev_h,
                     proposals,
                     vec![],

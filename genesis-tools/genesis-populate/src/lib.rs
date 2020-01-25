@@ -205,6 +205,7 @@ impl GenesisBuilder {
                 genesis.hash(),
                 genesis.header.inner_lite.height,
                 0,
+                false,
                 vec![],
                 vec![],
                 vec![],

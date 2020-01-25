@@ -609,7 +609,9 @@ pub fn setup_mock_all_validators(
                             }
                         }
                         NetworkRequests::Approval { approval_message } => {
-                            let height_mod = approval_message.approval.target_height % 300;
+                            let height_mod =
+                                approval_message.approval_and_rand_reveals.approval.target_height
+                                    % 300;
 
                             let do_propagate = if tamper_with_fg {
                                 if height_mod < 100 {
@@ -624,20 +626,23 @@ pub fn setup_mock_all_validators(
                                 true
                             };
 
-                            let approval = approval_message.approval.clone();
+                            let approval_and_rand_reveals =
+                                approval_message.approval_and_rand_reveals.clone();
 
                             if do_propagate {
                                 for (i, name) in validators_clone2.iter().flatten().enumerate() {
                                     if name == &approval_message.target {
                                         connectors1.read().unwrap()[i].0.do_send(
                                             NetworkClientMessages::BlockApproval(
-                                                approval.clone(),
+                                                approval_and_rand_reveals.clone(),
                                                 my_key_pair.id.clone(),
                                             ),
                                         );
                                     }
                                 }
                             }
+
+                            let approval = approval_and_rand_reveals.approval;
 
                             // Ensure the finality gadget invariant that no two approvals intersect
                             //     is maintained

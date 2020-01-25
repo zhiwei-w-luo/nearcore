@@ -204,6 +204,7 @@ pub fn record_block(
             BlockInfo::new(
                 height,
                 0,
+                false,
                 prev_h,
                 proposals,
                 vec![],

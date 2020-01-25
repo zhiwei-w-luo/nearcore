@@ -1,7 +1,7 @@
 //! Client is responsible for tracking the chain, chunks, and producing them when needed.
 //! This client works completely synchronously and must be operated by some async actor outside.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, RwLock};
 use std::time::Instant;
 
@@ -14,20 +14,25 @@ use near_chain::chain::TX_ROUTING_HEIGHT_HORIZON;
 use near_chain::test_utils::format_hash;
 use near_chain::types::{AcceptedBlock, LatestKnown, ReceiptResponse};
 use near_chain::{
-    BlockStatus, Chain, ChainGenesis, ChainStoreAccess, Doomslug, DoomslugThresholdMode,
-    Provenance, RuntimeAdapter, Tip,
+    byzantine_assert, BlockStatus, Chain, ChainGenesis, ChainStoreAccess, Doomslug,
+    DoomslugThresholdMode, Provenance, RuntimeAdapter, Tip,
 };
 use near_chain_configs::ClientConfig;
 use near_chunks::{ProcessPartialEncodedChunkResult, ShardsManager};
+use near_crypto::randomness::{CompressedShare, EncryptedShare, RandomRound};
 use near_network::{FullPeerInfo, NetworkAdapter, NetworkClientResponses, NetworkRequests};
-use near_primitives::block::{Approval, ApprovalMessage, Block, BlockHeader};
+use near_primitives::block::{
+    Approval, ApprovalAndRandRevealsRaw, ApprovalAndRandRevealsVerified, ApprovalMessage, Block,
+    BlockHeader,
+};
 use near_primitives::challenge::{Challenge, ChallengeBody};
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{merklize, MerklePath};
+use near_primitives::randomness::{BlockRandomnessDKGInfo, RandomnessDKGPhase};
 use near_primitives::receipt::Receipt;
 use near_primitives::sharding::{EncodedShardChunk, PartialEncodedChunk, ShardChunkHeader};
 use near_primitives::transaction::SignedTransaction;
-use near_primitives::types::{AccountId, BlockHeight, ChunkExtra, EpochId, ShardId};
+use near_primitives::types::{AccountId, BlockHeight, ChunkExtra, EpochId, NumSeats, ShardId};
 use near_primitives::unwrap_or_return;
 use near_primitives::utils::to_timestamp;
 use near_primitives::validator_signer::ValidatorSigner;
@@ -58,7 +63,7 @@ pub struct Client {
     /// Signer for block producer (if present).
     pub validator_signer: Option<Arc<dyn ValidatorSigner>>,
     /// Approvals for which we do not have the block yet
-    pending_approvals: SizedCache<CryptoHash, HashMap<AccountId, Approval>>,
+    pending_approvals: SizedCache<CryptoHash, HashMap<AccountId, ApprovalAndRandRevealsRaw>>,
     /// A mapping from a block for which a state sync is underway for the next epoch, and the object
     /// storing the current status of the state sync
     pub catchup_state_syncs: HashMap<CryptoHash, (StateSync, HashMap<u64, ShardSyncDownload>)>,
@@ -300,10 +305,6 @@ impl Client {
         let prev_next_bp_hash = prev.inner_lite.next_bp_hash;
         let prev_last_ds_final_block = prev.inner_rest.last_ds_final_block;
 
-        // Check and update the doomslug tip here. This guarantees that our endorsement will be in the
-        // doomslug witness. Have to do it before checking the ability to produce a block.
-        let _ = self.check_and_update_doomslug_tip()?;
-
         if self.should_reschedule_block(
             &head,
             &prev_hash,
@@ -325,7 +326,7 @@ impl Client {
             return Ok(None);
         }
 
-        let approvals = self.doomslug.remove_witness(&prev_hash, next_height);
+        let (approvals, rand_reveal) = self.doomslug.remove_witness(&prev_hash, next_height);
 
         // At this point, the previous epoch hash must be available
         let epoch_id = self
@@ -349,14 +350,10 @@ impl Client {
         )?
         .clone();
 
-        let account_id_to_stake = self
-            .runtime_adapter
-            .get_epoch_block_producers_ordered(&prev_epoch_id, &prev_hash)?
-            .iter()
-            .map(|x| (x.0.account_id.clone(), x.0.stake))
-            .collect();
+        let account_id_to_seats =
+            self.runtime_adapter.get_block_producers_to_seats_mapping(&prev_hash)?;
         let is_prev_block_ds_final =
-            Doomslug::is_approved_block_ds_final(&approvals, &account_id_to_stake);
+            Doomslug::is_approved_block_ds_final(&approvals, &account_id_to_seats);
 
         let last_ds_final_block =
             if is_prev_block_ds_final { prev_hash } else { prev_last_ds_final_block };
@@ -402,6 +399,18 @@ impl Client {
         // Get all the current challenges.
         let challenges = self.challenges.drain().map(|(_, challenge)| challenge).collect();
 
+        let new_dkg_info =
+            self.runtime_adapter.compute_new_dkg_info(&prev_block, next_height, &chunks)?;
+
+        let dkg_in_progress =
+            new_dkg_info.is_in_progress(self.runtime_adapter.num_total_parts() as NumSeats);
+
+        let random_value = prev_block.get_next_random_value(
+            self.runtime_adapter.num_total_parts() as NumSeats,
+            epoch_id != prev_epoch_id,
+            &rand_reveal,
+        );
+
         let block = Block::produce(
             &prev_header,
             next_height,
@@ -409,11 +418,15 @@ impl Client {
             epoch_id,
             next_epoch_id,
             approvals,
+            rand_reveal,
             gas_price_adjustment_rate,
             min_gas_price,
             inflation,
             prev_block_extra.challenges_result,
             challenges,
+            new_dkg_info,
+            dkg_in_progress,
+            random_value,
             &*validator_signer,
             score,
             quorums.last_quorum_pre_vote,
@@ -438,8 +451,19 @@ impl Client {
         last_header: ShardChunkHeader,
         next_height: BlockHeight,
         prev_block_timestamp: u64,
+        prev_dkg_info: &BlockRandomnessDKGInfo,
+        prev_dkg_phase: RandomnessDKGPhase,
         shard_id: ShardId,
-    ) -> Result<Option<(EncodedShardChunk, Vec<MerklePath>, Vec<Receipt>)>, Error> {
+    ) -> Result<
+        Option<(
+            EncodedShardChunk,
+            Vec<MerklePath>,
+            Vec<Receipt>,
+            Vec<CompressedShare>,
+            Vec<EncryptedShare>,
+        )>,
+        Error,
+    > {
         let validator_signer = self
             .validator_signer
             .as_ref()
@@ -475,7 +499,7 @@ impl Client {
 
         let chunk_extra = self
             .chain
-            .get_latest_chunk_extra(shard_id)
+            .get_chunk_extra(&prev_block_hash, shard_id)
             .map_err(|err| Error::ChunkProducer(format!("No chunk extra available: {}", err)))?
             .clone();
 
@@ -519,25 +543,29 @@ impl Client {
             self.runtime_adapter.build_receipts_hashes(&outgoing_receipts);
         let (outgoing_receipts_root, _) = merklize(&outgoing_receipts_hashes);
 
-        let (encoded_chunk, merkle_paths) = self.shards_mgr.create_encoded_shard_chunk(
-            prev_block_hash,
-            chunk_extra.state_root,
-            chunk_extra.outcome_root,
-            next_height,
-            shard_id,
-            chunk_extra.gas_used,
-            chunk_extra.gas_limit,
-            chunk_extra.rent_paid,
-            chunk_extra.validator_reward,
-            chunk_extra.balance_burnt,
-            chunk_extra.validator_proposals.clone(),
-            transactions,
-            &outgoing_receipts,
-            outgoing_receipts_root,
-            tx_root,
-            &*validator_signer,
-            &self.rs,
-        )?;
+        let (encoded_chunk, merkle_paths, dkg_public_shares, dkg_encrypted_secret_shares) =
+            self.shards_mgr.create_encoded_shard_chunk(
+                prev_block_hash,
+                chunk_extra.state_root,
+                chunk_extra.outcome_root,
+                next_height,
+                shard_id,
+                chunk_extra.gas_used,
+                chunk_extra.gas_limit,
+                chunk_extra.rent_paid,
+                chunk_extra.validator_reward,
+                chunk_extra.balance_burnt,
+                prev_dkg_info,
+                prev_dkg_phase,
+                chunk_extra.validator_proposals.clone(),
+                transactions,
+                &outgoing_receipts,
+                outgoing_receipts_root,
+                tx_root,
+                &*validator_signer,
+                self.chain.mut_store(),
+                &self.rs,
+            )?;
 
         debug!(
             target: "client",
@@ -551,7 +579,13 @@ impl Client {
         );
 
         near_metrics::inc_counter(&metrics::BLOCK_PRODUCED_TOTAL);
-        Ok(Some((encoded_chunk, merkle_paths, outgoing_receipts)))
+        Ok(Some((
+            encoded_chunk,
+            merkle_paths,
+            outgoing_receipts,
+            dkg_public_shares,
+            dkg_encrypted_secret_shares,
+        )))
     }
 
     /// Prepares an ordered list of valid transactions from the pool up the limits.
@@ -663,7 +697,7 @@ impl Client {
         }
 
         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-            self.shards_mgr.request_chunks(missing_chunks).unwrap();
+            self.request_chunks(missing_chunks).unwrap();
         }
         let unwrapped_accepted_blocks = accepted_blocks.write().unwrap().drain(..).collect();
         (unwrapped_accepted_blocks, result)
@@ -676,12 +710,31 @@ impl Client {
         }
     }
 
+    pub fn request_chunks(
+        &mut self,
+        chunks_to_request: Vec<ShardChunkHeader>,
+    ) -> Result<(), Error> {
+        Ok(self.shards_mgr.request_chunks(
+            chunks_to_request,
+            match &self.validator_signer {
+                None => None,
+                Some(validator_signer) => Some(&**validator_signer),
+            },
+            self.chain.mut_store(),
+            &self.rs,
+        )?)
+    }
+
     pub fn process_partial_encoded_chunk(
         &mut self,
         partial_encoded_chunk: PartialEncodedChunk,
     ) -> Result<Vec<AcceptedBlock>, Error> {
         let process_result = self.shards_mgr.process_partial_encoded_chunk(
             partial_encoded_chunk.clone(),
+            match &self.validator_signer {
+                None => None,
+                Some(validator_signer) => Some(&**validator_signer),
+            },
             self.chain.mut_store(),
             &self.rs,
         )?;
@@ -692,7 +745,7 @@ impl Client {
                 Ok(self.process_blocks_with_missing_chunks(prev_block_hash))
             }
             ProcessPartialEncodedChunkResult::NeedMorePartsOrReceipts(chunk_header) => {
-                self.shards_mgr.request_chunks(vec![chunk_header]).unwrap();
+                self.request_chunks(vec![chunk_header]).unwrap();
                 Ok(vec![])
             }
             ProcessPartialEncodedChunkResult::NeedBlock => {
@@ -741,6 +794,10 @@ impl Client {
                 Instant::now(),
                 tip.last_block_hash,
                 self.chain.get_my_approval_reference_hash(tip.last_block_hash),
+                self.chain.get_my_rand_reveals(
+                    &self.validator_signer.as_ref().map(|x| x.validator_id().clone()),
+                    tip.last_block_hash,
+                )?,
                 tip.height,
                 last_ds_final_height,
             );
@@ -749,15 +806,21 @@ impl Client {
         Ok(())
     }
 
-    pub fn send_approval(&mut self, approval: Approval) -> Result<(), Error> {
-        let parent_hash = approval.parent_hash;
+    pub fn send_approval(
+        &mut self,
+        approval_and_rand_reveals: ApprovalAndRandRevealsRaw,
+    ) -> Result<(), Error> {
+        let parent_hash = approval_and_rand_reveals.approval.parent_hash;
+        let target_height = approval_and_rand_reveals.approval.target_height;
+
         let next_epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&parent_hash)?;
         let next_block_producer =
-            self.runtime_adapter.get_block_producer(&next_epoch_id, approval.target_height)?;
+            self.runtime_adapter.get_block_producer(&next_epoch_id, target_height)?;
         if Some(&next_block_producer) == self.validator_signer.as_ref().map(|x| x.validator_id()) {
-            self.collect_block_approval(&approval, false);
+            self.collect_block_approval(&approval_and_rand_reveals, false);
         } else {
-            let approval_message = ApprovalMessage::new(approval, next_block_producer);
+            let approval_message =
+                ApprovalMessage::new(approval_and_rand_reveals, next_block_producer);
             self.network_adapter.do_send(NetworkRequests::Approval { approval_message });
         }
 
@@ -785,10 +848,10 @@ impl Client {
         // If we produced the block, then it should have already been broadcasted.
         // If received the block from another node then broadcast "header first" to minimise network traffic.
         if provenance == Provenance::NONE {
-            let approvals = self.pending_approvals.cache_remove(&block_hash);
-            if let Some(approvals) = approvals {
-                for (_account_id, approval) in approvals {
-                    self.collect_block_approval(&approval, false);
+            let approvals_and_rand_revealss = self.pending_approvals.cache_remove(&block_hash);
+            if let Some(approvals_and_rand_revealss) = approvals_and_rand_revealss {
+                for (_account_id, approval_and_rand_reveals) in approvals_and_rand_revealss {
+                    self.collect_block_approval(&approval_and_rand_reveals, false);
                 }
             }
 
@@ -894,20 +957,34 @@ impl Client {
                             block.chunks[shard_id as usize].clone(),
                             block.header.inner_lite.height + 1,
                             block.header.inner_lite.timestamp,
+                            &block.dkg_info,
+                            self.runtime_adapter
+                                .get_block_dkg_phase(&block)
+                                .expect("Failed to compute DKG phase for a freshly accepted block"),
                             shard_id,
                         ) {
-                            Ok(Some((encoded_chunk, merkle_paths, receipts))) => self
+                            Ok(Some((
+                                encoded_chunk,
+                                merkle_paths,
+                                receipts,
+                                dkg_public_shares,
+                                dkg_encrypted_secret_shares,
+                            ))) => self
                                 .shards_mgr
                                 .distribute_encoded_chunk(
                                     encoded_chunk,
                                     merkle_paths,
                                     receipts,
+                                    dkg_public_shares,
+                                    dkg_encrypted_secret_shares,
+                                    &*validator_signer,
                                     self.chain.mut_store(),
                                 )
                                 .expect("Failed to process produced chunk"),
                             Ok(None) => {}
                             Err(err) => {
                                 error!(target: "client", "Error producing chunk {:?}", err);
+                                byzantine_assert!(false);
                             }
                         }
                     }
@@ -952,7 +1029,7 @@ impl Client {
         }, |missing_chunks| blocks_missing_chunks.write().unwrap().push(missing_chunks), |challenge| challenges.write().unwrap().push(challenge));
         self.send_challenges(challenges);
         for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-            self.shards_mgr.request_chunks(missing_chunks).unwrap();
+            self.request_chunks(missing_chunks).unwrap();
         }
         let unwrapped_accepted_blocks = accepted_blocks.write().unwrap().drain(..).collect();
         unwrapped_accepted_blocks
@@ -967,10 +1044,15 @@ impl Client {
     /// approval to `pending_approvals`, since it could be that the approval is from the next epoch.
     ///
     /// # Arguments
-    /// * `approval` - the approval to be collected
-    /// * `is_ours`  - whether the approval was just produced by us (in which case skip validation,
+    /// * `approval_and_rand_reveals` - the approval to be collected, alongside with rand reveals
+    /// * `is_ours` - whether the approval was just produced by us (in which case skip validation,
     ///                only check whether we are the next block producer and store in Doomslug)
-    pub fn collect_block_approval(&mut self, approval: &Approval, is_ours: bool) {
+    pub fn collect_block_approval(
+        &mut self,
+        approval_and_rand_reveals: &ApprovalAndRandRevealsRaw,
+        is_ours: bool,
+    ) {
+        let approval = &approval_and_rand_reveals.approval;
         let Approval {
             parent_hash,
             reference_hash,
@@ -980,16 +1062,17 @@ impl Client {
             signature,
         } = approval;
 
-        let head = match self.chain.head() {
-            Ok(head) => head,
-            Err(_) => return,
-        };
+        let next_epoch_id =
+            match self.runtime_adapter.get_epoch_id_from_prev_block(&approval.parent_hash) {
+                Err(_) => return,
+                Ok(next_epoch_id) => next_epoch_id,
+            };
 
         if !is_ours {
             // Check signature is correct for given validator.
             match self.runtime_adapter.verify_validator_signature(
-                &head.epoch_id,
-                &head.last_block_hash,
+                &next_epoch_id,
+                &parent_hash,
                 account_id,
                 Approval::get_data_for_sig(
                     parent_hash,
@@ -1011,16 +1094,11 @@ impl Client {
         }
 
         let is_block_producer =
-            match self.runtime_adapter.get_epoch_id_from_prev_block(&approval.parent_hash) {
+            match self.runtime_adapter.get_block_producer(&next_epoch_id, *target_height) {
                 Err(_) => false,
-                Ok(next_epoch_id) => {
-                    match self.runtime_adapter.get_block_producer(&next_epoch_id, *target_height) {
-                        Err(_) => false,
-                        Ok(target_block_producer) => {
-                            Some(&target_block_producer)
-                                == self.validator_signer.as_ref().map(|x| x.validator_id())
-                        }
-                    }
+                Ok(target_block_producer) => {
+                    Some(&target_block_producer)
+                        == self.validator_signer.as_ref().map(|x| x.validator_id())
                 }
             };
 
@@ -1041,28 +1119,117 @@ impl Client {
                         .pending_approvals
                         .cache_remove(parent_hash)
                         .unwrap_or_else(|| HashMap::new());
-                    entry.insert(account_id.clone(), approval.clone());
+                    entry.insert(account_id.clone(), approval_and_rand_reveals.clone());
                     self.pending_approvals.cache_set(*parent_hash, entry);
                     return;
                 }
             };
         }
 
-        let block_producer_stakes = match self
-            .runtime_adapter
-            .get_epoch_block_producers_ordered(&head.epoch_id, &parent_hash)
-        {
-            Ok(block_producer_stakes) => block_producer_stakes,
-            Err(err) => {
-                error!(target: "client", "Block approval error: {}", err);
-                return;
+        let account_id_to_seats =
+            match self.runtime_adapter.get_block_producers_to_seats_mapping(&parent_hash) {
+                Ok(account_id_to_seats) => account_id_to_seats,
+                Err(err) => {
+                    error!(target: "client", "Block approval error: {}", err);
+                    return;
+                }
+            };
+
+        let approval_and_rand_reveals_verified =
+            match self.verify_rand_reveals(&parent_hash, approval_and_rand_reveals) {
+                Ok(approval_and_rand_reveals) => approval_and_rand_reveals,
+                Err(_) => ApprovalAndRandRevealsVerified {
+                    approval: approval_and_rand_reveals.approval.clone(),
+                    rand_reveals: vec![],
+                },
+            };
+
+        self.doomslug.on_approval_message(
+            Instant::now(),
+            approval_and_rand_reveals_verified,
+            &account_id_to_seats,
+        );
+    }
+
+    /// Verifies that all the revealed random shares are correct with respect to the random epoch,
+    /// and that the shares are coming from the correct block producer.
+    /// For the invalid rand reveals, we just drop them. Incorrect rand reveals should not prevent
+    /// recording correct ones, or the approval itself.
+    /// In debug mode compiled with byzantine assert (test mode in which no failures are expected)
+    /// the function would assert if any of the shares get dropped.
+    ///
+    /// # Arguments
+    /// * `approval_and_rand_reveals` - the raw message that was received from the peer, to be verified
+    ///
+    /// # Returns
+    /// The same approval and rand reveals, with all the invalid reveals filtered out. The type of
+    /// the return value is intentionally different so that all other parts of the code know whether
+    /// the rand reveals were already verified.
+    fn verify_rand_reveals(
+        &mut self,
+        parent_hash: &CryptoHash,
+        approval_and_rand_reveals: &ApprovalAndRandRevealsRaw,
+    ) -> Result<ApprovalAndRandRevealsVerified, Error> {
+        if approval_and_rand_reveals.rand_reveals.len() == 0 {
+            return Ok(ApprovalAndRandRevealsVerified {
+                approval: approval_and_rand_reveals.approval.clone(),
+                rand_reveals: vec![],
+            });
+        }
+
+        let mut seen_part_ords = HashSet::new();
+        let mut validated_rand_reveals = vec![];
+
+        let parent_block = self.chain.get_block(parent_hash)?;
+
+        let next_epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&parent_hash)?;
+
+        let random_epoch = match parent_block.dkg_info.get_next_random_epoch(
+            self.runtime_adapter.num_total_parts() as NumSeats,
+            next_epoch_id != parent_block.header.inner_lite.epoch_id,
+        ) {
+            Some(random_epoch) => random_epoch,
+            None => {
+                byzantine_assert!(false);
+                return Err(Error::Other("Can't create random epoch".into()));
             }
         };
 
-        let block_producer_stakes =
-            block_producer_stakes.into_iter().map(|x| x.0).collect::<Vec<_>>();
+        let random_round = RandomRound::new(&(parent_hash.0).0, 0); // MOO height?
 
-        self.doomslug.on_approval_message(Instant::now(), &approval, &block_producer_stakes);
+        for (part_ord, raw_rand_reveal) in approval_and_rand_reveals.rand_reveals.iter() {
+            if seen_part_ords.contains(part_ord)
+                || *part_ord as usize >= self.runtime_adapter.num_total_parts()
+            {
+                byzantine_assert!(false);
+                continue;
+            }
+
+            if self
+                .runtime_adapter
+                .get_part_owner(&approval_and_rand_reveals.approval.parent_hash, *part_ord)?
+                != approval_and_rand_reveals.approval.account_id
+            {
+                byzantine_assert!(false);
+                continue;
+            }
+
+            if random_epoch
+                .validate_share(&random_round, *part_ord as usize, raw_rand_reveal)
+                .is_none()
+            {
+                byzantine_assert!(false);
+                continue;
+            }
+
+            validated_rand_reveals.push((*part_ord, raw_rand_reveal.clone()));
+            seen_part_ords.insert(*part_ord);
+        }
+
+        Ok(ApprovalAndRandRevealsVerified {
+            approval: approval_and_rand_reveals.approval.clone(),
+            rand_reveals: validated_rand_reveals,
+        })
     }
 
     /// Forwards given transaction to upcoming validators.
@@ -1240,7 +1407,7 @@ impl Client {
                     self.send_challenges(challenges);
 
                     for missing_chunks in blocks_missing_chunks.write().unwrap().drain(..) {
-                        self.shards_mgr.request_chunks(missing_chunks).unwrap();
+                        self.request_chunks(missing_chunks).unwrap();
                     }
                     let unwrapped_accepted_blocks =
                         accepted_blocks.write().unwrap().drain(..).collect();
@@ -1266,12 +1433,9 @@ impl Client {
             challenge.hash.as_ref(),
             &challenge.signature,
         )? {
-            // If challenge is not double sign, we should process it right away to invalidate the chain.
-            match challenge.body {
-                ChallengeBody::BlockDoubleSign(_) => {}
-                _ => {
-                    self.chain.process_challenge(&challenge);
-                }
+            // If challenge invalidates some block, we should process it right away to invalidate the chain.
+            if challenge.body.invalidates_block() {
+                self.chain.process_challenge(&challenge);
             }
             self.challenges.insert(challenge.hash, challenge);
         }

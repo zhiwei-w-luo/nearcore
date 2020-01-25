@@ -1,6 +1,7 @@
 use near_chain::test_utils::setup;
 use near_chain::{Block, ChainStoreAccess, ErrorKind, Provenance};
 use near_primitives::hash::CryptoHash;
+use near_primitives::randomness::BlockRandomnessDKGInfo;
 use near_primitives::test_utils::init_test_logger;
 
 #[test]
@@ -43,11 +44,15 @@ fn build_chain_with_orhpans() {
         last_block.header.inner_lite.epoch_id.clone(),
         last_block.header.inner_lite.next_epoch_id.clone(),
         vec![],
+        vec![],
         0,
         0,
         Some(0),
         vec![],
         vec![],
+        BlockRandomnessDKGInfo::default(),
+        false,
+        last_block.header.hash(),
         &*signer,
         0.into(),
         CryptoHash::default(),

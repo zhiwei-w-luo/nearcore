@@ -17,6 +17,7 @@ use near_chain::{
 use near_chain_configs::GenesisConfig;
 use near_client::test_utils::{MockNetworkAdapter, TestEnv};
 use near_client::Client;
+use near_crypto::randomness::{CompressedShare, EncryptedShare};
 use near_crypto::{InMemorySigner, KeyType, Signer};
 use near_network::NetworkRequests;
 use near_primitives::challenge::{
@@ -24,6 +25,9 @@ use near_primitives::challenge::{
 };
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{merklize, MerklePath};
+use near_primitives::randomness::{
+    ChunkRandomnessDkgInfoBody, ChunkRandomnessDkgInfoHeader, RandomnessDKGPhase,
+};
 use near_primitives::receipt::Receipt;
 use near_primitives::serialize::BaseDecode;
 use near_primitives::sharding::EncodedShardChunk;
@@ -50,11 +54,15 @@ fn test_verify_block_double_sign_challenge() {
         b1.header.inner_lite.epoch_id.clone(),
         b1.header.inner_lite.next_epoch_id.clone(),
         vec![],
+        vec![],
         0,
         0,
         None,
         vec![],
         vec![],
+        Default::default(),
+        false,
+        genesis.header.hash,
         &signer,
         0.into(),
         CryptoHash::default(),
@@ -138,7 +146,14 @@ fn test_verify_block_double_sign_challenge() {
 
 fn create_invalid_proofs_chunk(
     client: &mut Client,
-) -> (EncodedShardChunk, Vec<MerklePath>, Vec<Receipt>, Block) {
+) -> (
+    EncodedShardChunk,
+    Vec<MerklePath>,
+    Vec<Receipt>,
+    Vec<CompressedShare>,
+    Vec<EncryptedShare>,
+    Block,
+) {
     create_chunk(
         client,
         None,
@@ -149,7 +164,14 @@ fn create_invalid_proofs_chunk(
 fn create_chunk_with_transactions(
     client: &mut Client,
     transactions: Vec<SignedTransaction>,
-) -> (EncodedShardChunk, Vec<MerklePath>, Vec<Receipt>, Block) {
+) -> (
+    EncodedShardChunk,
+    Vec<MerklePath>,
+    Vec<Receipt>,
+    Vec<CompressedShare>,
+    Vec<EncryptedShare>,
+    Block,
+) {
     create_chunk(client, Some(transactions), None)
 }
 
@@ -157,16 +179,26 @@ fn create_chunk(
     client: &mut Client,
     replace_transactions: Option<Vec<SignedTransaction>>,
     replace_tx_root: Option<CryptoHash>,
-) -> (EncodedShardChunk, Vec<MerklePath>, Vec<Receipt>, Block) {
+) -> (
+    EncodedShardChunk,
+    Vec<MerklePath>,
+    Vec<Receipt>,
+    Vec<CompressedShare>,
+    Vec<EncryptedShare>,
+    Block,
+) {
     let last_block =
         client.chain.get_block_by_height(client.chain.head().unwrap().height).unwrap().clone();
-    let (mut chunk, mut merkle_paths, receipts) = client
+    let (mut chunk, mut merkle_paths, receipts, public_shares, secret_shares) = client
         .produce_chunk(
             last_block.hash(),
             &last_block.header.inner_lite.epoch_id,
             last_block.chunks[0].clone(),
             2,
             0,
+            &last_block.dkg_info,
+            // The epoch length is set to 10, so target height 2 is beyond the first 10% of the epoch
+            RandomnessDKGPhase::Challenge,
             0,
         )
         .unwrap()
@@ -193,6 +225,8 @@ fn create_chunk(
             chunk.header.inner.rent_paid,
             chunk.header.inner.validator_reward,
             chunk.header.inner.balance_burnt,
+            ChunkRandomnessDkgInfoHeader::None,
+            ChunkRandomnessDkgInfoBody::None,
             tx_root,
             chunk.header.inner.validator_proposals.clone(),
             transactions,
@@ -219,26 +253,31 @@ fn create_chunk(
         last_block.header.inner_lite.epoch_id.clone(),
         last_block.header.inner_lite.next_epoch_id.clone(),
         vec![],
+        vec![],
         0,
         0,
         None,
         vec![],
         vec![],
-        &*client.validator_signer.as_ref().unwrap().clone(),
+        Default::default(),
+        false,
+        last_block.header.hash,
+        &**client.validator_signer.as_ref().unwrap(),
         0.into(),
         CryptoHash::default(),
         CryptoHash::default(),
         CryptoHash::default(),
         last_block.header.inner_lite.next_bp_hash,
     );
-    (chunk, merkle_paths, receipts, block)
+    (chunk, merkle_paths, receipts, public_shares, secret_shares, block)
 }
 
 #[test]
 fn test_verify_chunk_invalid_proofs_challenge() {
     let mut env = TestEnv::new(ChainGenesis::test(), 1, 1);
     env.produce_block(0, 1);
-    let (chunk, _merkle_paths, _receipts, block) = create_invalid_proofs_chunk(&mut env.clients[0]);
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_invalid_proofs_chunk(&mut env.clients[0]);
 
     let challenge_result = challenge(
         env,
@@ -253,7 +292,7 @@ fn test_verify_chunk_invalid_proofs_challenge() {
 fn test_verify_chunk_invalid_proofs_challenge_decoded_chunk() {
     let mut env = TestEnv::new(ChainGenesis::test(), 1, 1);
     env.produce_block(0, 1);
-    let (encoded_chunk, _merkle_paths, _receipts, block) =
+    let (encoded_chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
         create_invalid_proofs_chunk(&mut env.clients[0]);
     let chunk =
         encoded_chunk.decode_chunk(env.clients[0].chain.runtime_adapter.num_data_parts()).unwrap();
@@ -272,7 +311,8 @@ fn test_verify_chunk_proofs_malicious_challenge_no_changes() {
     let mut env = TestEnv::new(ChainGenesis::test(), 1, 1);
     env.produce_block(0, 1);
     // Valid chunk
-    let (chunk, _merkle_paths, _receipts, block) = create_chunk(&mut env.clients[0], None, None);
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_chunk(&mut env.clients[0], None, None);
 
     let challenge_result = challenge(
         env,
@@ -291,27 +331,28 @@ fn test_verify_chunk_proofs_malicious_challenge_valid_order_transactions() {
     let genesis_hash = env.clients[0].chain.genesis().hash();
     let signer = InMemorySigner::from_seed("test0", KeyType::ED25519, "test0");
 
-    let (chunk, _merkle_paths, _receipts, block) = create_chunk_with_transactions(
-        &mut env.clients[0],
-        vec![
-            SignedTransaction::send_money(
-                1,
-                "test0".to_string(),
-                "test1".to_string(),
-                &signer,
-                1000,
-                genesis_hash,
-            ),
-            SignedTransaction::send_money(
-                2,
-                "test0".to_string(),
-                "test1".to_string(),
-                &signer,
-                1000,
-                genesis_hash,
-            ),
-        ],
-    );
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_sharse, block) =
+        create_chunk_with_transactions(
+            &mut env.clients[0],
+            vec![
+                SignedTransaction::send_money(
+                    1,
+                    "test0".to_string(),
+                    "test1".to_string(),
+                    &signer,
+                    1000,
+                    genesis_hash,
+                ),
+                SignedTransaction::send_money(
+                    2,
+                    "test0".to_string(),
+                    "test1".to_string(),
+                    &signer,
+                    1000,
+                    genesis_hash,
+                ),
+            ],
+        );
 
     let challenge_result = challenge(
         env,
@@ -330,27 +371,28 @@ fn test_verify_chunk_proofs_challenge_transaction_order() {
     let genesis_hash = env.clients[0].chain.genesis().hash();
     let signer = InMemorySigner::from_seed("test0", KeyType::ED25519, "test0");
 
-    let (chunk, _merkle_paths, _receipts, block) = create_chunk_with_transactions(
-        &mut env.clients[0],
-        vec![
-            SignedTransaction::send_money(
-                2,
-                "test0".to_string(),
-                "test1".to_string(),
-                &signer,
-                1000,
-                genesis_hash,
-            ),
-            SignedTransaction::send_money(
-                1,
-                "test0".to_string(),
-                "test1".to_string(),
-                &signer,
-                1000,
-                genesis_hash,
-            ),
-        ],
-    );
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_chunk_with_transactions(
+            &mut env.clients[0],
+            vec![
+                SignedTransaction::send_money(
+                    2,
+                    "test0".to_string(),
+                    "test1".to_string(),
+                    &signer,
+                    1000,
+                    genesis_hash,
+                ),
+                SignedTransaction::send_money(
+                    1,
+                    "test0".to_string(),
+                    "test1".to_string(),
+                    &signer,
+                    1000,
+                    genesis_hash,
+                ),
+            ],
+        );
     let challenge_result = challenge(
         env,
         chunk.header.inner.shard_id as usize,
@@ -367,17 +409,18 @@ fn test_verify_chunk_proofs_challenge_transaction_validity() {
 
     let signer = InMemorySigner::from_seed("test0", KeyType::ED25519, "test0");
 
-    let (chunk, _merkle_paths, _receipts, block) = create_chunk_with_transactions(
-        &mut env.clients[0],
-        vec![SignedTransaction::send_money(
-            1,
-            "test0".to_string(),
-            "test1".to_string(),
-            &signer,
-            1000,
-            CryptoHash::default(),
-        )],
-    );
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_chunk_with_transactions(
+            &mut env.clients[0],
+            vec![SignedTransaction::send_money(
+                1,
+                "test0".to_string(),
+                "test1".to_string(),
+                &signer,
+                1000,
+                CryptoHash::default(),
+            )],
+        );
     let challenge_result = challenge(
         env,
         chunk.header.inner.shard_id as usize,
@@ -447,8 +490,10 @@ fn test_verify_chunk_invalid_state_challenge() {
     let data_parts = env.clients[0].runtime_adapter.num_data_parts();
     let parity_parts = total_parts - data_parts;
     let rs = ReedSolomon::new(data_parts, parity_parts).unwrap();
-    let (mut invalid_chunk, merkle_paths) = env.clients[0]
-        .shards_mgr
+
+    let Client { shards_mgr, chain, .. } = &mut env.clients[0];
+
+    let (mut invalid_chunk, merkle_paths, public_shares, secret_shares) = shards_mgr
         .create_encoded_shard_chunk(
             last_block.hash(),
             StateRoot::default(),
@@ -460,26 +505,29 @@ fn test_verify_chunk_invalid_state_challenge() {
             0,
             0,
             0,
+            &Default::default(),
+            RandomnessDKGPhase::Commit,
             vec![],
             vec![],
             &vec![],
             last_block.chunks[0].inner.outgoing_receipts_root,
             CryptoHash::default(),
             &validator_signer,
+            chain.mut_store(),
             &rs,
         )
         .unwrap();
 
-    let client = &mut env.clients[0];
-
     // Receive invalid chunk to the validator.
-    client
-        .shards_mgr
+    shards_mgr
         .distribute_encoded_chunk(
             invalid_chunk.clone(),
             merkle_paths,
             vec![],
-            client.chain.mut_store(),
+            public_shares,
+            secret_shares,
+            &validator_signer,
+            chain.mut_store(),
         )
         .unwrap();
 
@@ -491,11 +539,15 @@ fn test_verify_chunk_invalid_state_challenge() {
         last_block.header.inner_lite.epoch_id.clone(),
         last_block.header.inner_lite.next_epoch_id.clone(),
         vec![],
+        vec![],
         0,
         0,
         None,
         vec![],
         vec![],
+        Default::default(),
+        false,
+        last_block.header.hash,
         &validator_signer,
         0.into(),
         CryptoHash::default(),
@@ -506,7 +558,6 @@ fn test_verify_chunk_invalid_state_challenge() {
 
     let challenge_body = {
         use near_chain::chain::{ChainUpdate, OrphanBlockPool};
-        let chain = &mut client.chain;
         let adapter = chain.runtime_adapter.clone();
         let validity_period = chain.transaction_validity_period;
         let epoch_length = chain.epoch_length;
@@ -552,11 +603,11 @@ fn test_verify_chunk_invalid_state_challenge() {
     }
     let challenge =
         Challenge::produce(ChallengeBody::ChunkState(challenge_body), &validator_signer);
-    let transaction_validity_period = client.chain.transaction_validity_period;
-    let runtime_adapter = client.chain.runtime_adapter.clone();
+    let transaction_validity_period = chain.transaction_validity_period;
+    let runtime_adapter = chain.runtime_adapter.clone();
     assert_eq!(
         validate_challenge(
-            client.chain.mut_store(),
+            chain.mut_store(),
             &*runtime_adapter,
             &block.header.inner_lite.epoch_id,
             &block.header.prev_hash,
@@ -569,7 +620,7 @@ fn test_verify_chunk_invalid_state_challenge() {
 
     // Process the block with invalid chunk and make sure it's marked as invalid at the end.
     // And the same challenge created and sent out.
-    let (_, tip) = client.process_block(block, Provenance::NONE);
+    let (_, tip) = env.clients[0].process_block(block, Provenance::NONE);
     assert!(tip.is_err());
 
     let last_message = env.network_adapters[0].pop().unwrap();
@@ -584,11 +635,13 @@ fn test_verify_chunk_invalid_state_challenge() {
 #[test]
 fn test_receive_invalid_chunk_as_chunk_producer() {
     init_test_logger();
+    let validator_signer = InMemoryValidatorSigner::from_seed("test0", KeyType::ED25519, "test0");
     let mut env = TestEnv::new(ChainGenesis::test(), 2, 1);
     env.produce_block(0, 1);
     let block1 = env.clients[0].chain.get_block_by_height(1).unwrap().clone();
     env.process_block(1, block1, Provenance::NONE);
-    let (chunk, merkle_paths, receipts, block) = create_invalid_proofs_chunk(&mut env.clients[0]);
+    let (chunk, merkle_paths, receipts, public_shares, secret_shares, block) =
+        create_invalid_proofs_chunk(&mut env.clients[0]);
     let client = &mut env.clients[0];
     assert!(client
         .shards_mgr
@@ -596,6 +649,9 @@ fn test_receive_invalid_chunk_as_chunk_producer() {
             chunk.clone(),
             merkle_paths.clone(),
             receipts.clone(),
+            public_shares,
+            secret_shares,
+            &validator_signer,
             client.chain.mut_store()
         )
         .is_err());
@@ -618,6 +674,7 @@ fn test_receive_invalid_chunk_as_chunk_producer() {
             vec![0],
             true,
             one_part_receipt_proofs,
+            vec![],
             &vec![merkle_paths[0].clone()]
         ))
         .is_ok());
@@ -661,7 +718,8 @@ fn test_block_challenge() {
     init_test_logger();
     let mut env = TestEnv::new(ChainGenesis::test(), 1, 1);
     env.produce_block(0, 1);
-    let (chunk, _merkle_paths, _receipts, block) = create_invalid_proofs_chunk(&mut env.clients[0]);
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_invalid_proofs_chunk(&mut env.clients[0]);
 
     let merkle_paths = Block::compute_chunk_headers_root(&block.chunks).1;
     let challenge = Challenge::produce(
@@ -714,7 +772,8 @@ fn test_fishermen_challenge() {
         env.produce_block(0, i);
     }
 
-    let (chunk, _merkle_paths, _receipts, block) = create_invalid_proofs_chunk(&mut env.clients[0]);
+    let (chunk, _merkle_paths, _receipts, _public_shares, _secret_shares, block) =
+        create_invalid_proofs_chunk(&mut env.clients[0]);
 
     let merkle_paths = Block::compute_chunk_headers_root(&block.chunks).1;
     let challenge_body = ChallengeBody::ChunkProofs(ChunkProofs {

@@ -4,17 +4,25 @@ use borsh::{BorshDeserialize, BorshSerialize};
 use chrono::{DateTime, Utc};
 use reed_solomon_erasure::galois_8::ReedSolomon;
 
+use near_crypto::randomness::{RandomEpoch, RandomRound, RandomShare};
 use near_crypto::{KeyType, PublicKey, Signature};
 
 use crate::challenge::{Challenges, ChallengesResult};
 use crate::hash::{hash, CryptoHash};
 use crate::merkle::{combine_hash, merklize, verify_path, MerklePath};
+use crate::randomness::{
+    BlockRandomnessDKGInfo, ChunkRandomnessDkgInfoBody, ChunkRandomnessDkgInfoHeader,
+};
 use crate::sharding::{ChunkHashHeight, EncodedShardChunk, ShardChunk, ShardChunkHeader};
 use crate::types::{
-    AccountId, Balance, BlockHeight, EpochId, Gas, MerkleHash, NumShards, StateRoot, ValidatorStake,
+    AccountId, Balance, BlockHeight, EpochId, Gas, MerkleHash, NumSeats, NumShards, StateRoot,
+    ValidatorStake,
 };
 use crate::utils::{from_timestamp, to_timestamp};
 use crate::validator_signer::{EmptyValidatorSigner, ValidatorSigner};
+
+#[cfg(feature = "byzantine_asserts")]
+use rand::thread_rng;
 
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct BlockHeaderInnerLite {
@@ -46,6 +54,11 @@ pub struct BlockHeaderInnerRest {
     pub chunks_included: u64,
     /// Root hash of the challenges in the given block.
     pub challenges_root: MerkleHash,
+    /// The hash of the DKG info and the phase
+    pub dkg_info_hash: CryptoHash,
+    pub dkg_in_progress: bool,
+    /// The output of the randomness beacon
+    pub random_value: CryptoHash,
     /// Score.
     pub score: BlockScore,
     /// Validator proposals.
@@ -107,6 +120,9 @@ impl BlockHeaderInnerRest {
         chunk_tx_root: MerkleHash,
         chunks_included: u64,
         challenges_root: MerkleHash,
+        dkg_info_hash: CryptoHash,
+        dkg_in_progress: bool,
+        random_value: CryptoHash,
         score: BlockScore,
         validator_proposals: Vec<ValidatorStake>,
         chunk_mask: Vec<bool>,
@@ -126,6 +142,9 @@ impl BlockHeaderInnerRest {
             chunk_tx_root,
             chunks_included,
             challenges_root,
+            dkg_info_hash,
+            dkg_in_progress,
+            random_value,
             score,
             validator_proposals,
             chunk_mask,
@@ -160,7 +179,7 @@ pub struct Approval {
 /// Block approval by other block producers.
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
 pub struct ApprovalMessage {
-    pub approval: Approval,
+    pub approval_and_rand_reveals: ApprovalAndRandRevealsRaw,
     pub target: AccountId,
 }
 
@@ -203,8 +222,8 @@ impl Approval {
 }
 
 impl ApprovalMessage {
-    pub fn new(approval: Approval, target: AccountId) -> Self {
-        ApprovalMessage { approval, target }
+    pub fn new(approval_and_rand_reveals: ApprovalAndRandRevealsRaw, target: AccountId) -> Self {
+        ApprovalMessage { approval_and_rand_reveals, target }
     }
 }
 
@@ -261,6 +280,9 @@ impl BlockHeader {
         timestamp: u64,
         chunks_included: u64,
         challenges_root: MerkleHash,
+        dkg_info_hash: CryptoHash,
+        dkg_in_progress: bool,
+        random_value: CryptoHash,
         score: BlockScore,
         validator_proposals: Vec<ValidatorStake>,
         chunk_mask: Vec<bool>,
@@ -293,6 +315,9 @@ impl BlockHeader {
             chunk_tx_root,
             chunks_included,
             challenges_root,
+            dkg_info_hash,
+            dkg_in_progress,
+            random_value,
             score,
             validator_proposals,
             chunk_mask,
@@ -337,6 +362,9 @@ impl BlockHeader {
             chunk_tx_root,
             chunks_included,
             challenges_root,
+            BlockRandomnessDKGInfo::default().hash(),
+            false,
+            CryptoHash::default(),
             0.into(),
             vec![],
             vec![],
@@ -382,11 +410,28 @@ impl BlockHeader {
     }
 }
 
+/// Contains a vector of seat ordinals and rand reveals
+#[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, PartialEq, Eq)]
+pub struct ApprovalAndRandRevealsRaw {
+    pub approval: Approval,
+    pub rand_reveals: Vec<(NumSeats, RandomShare)>,
+}
+
+/// Same as `AccountRandRevealRaw`, but has been verified that the seat ordinals actually correspond
+/// to the account
+#[derive(Clone)]
+pub struct ApprovalAndRandRevealsVerified {
+    pub approval: Approval,
+    pub rand_reveals: Vec<(NumSeats, RandomShare)>,
+}
+
 #[derive(BorshSerialize, BorshDeserialize, Serialize, Debug, Clone, Eq, PartialEq)]
 pub struct Block {
     pub header: BlockHeader,
     pub chunks: Vec<ShardChunkHeader>,
     pub challenges: Challenges,
+    pub dkg_info: BlockRandomnessDKGInfo,
+    pub rand_reveal: Vec<Option<RandomShare>>,
 }
 
 pub fn genesis_chunks(
@@ -411,6 +456,8 @@ pub fn genesis_chunks(
                 0,
                 0,
                 0,
+                ChunkRandomnessDkgInfoHeader::None,
+                ChunkRandomnessDkgInfoBody::None,
                 CryptoHash::default(),
                 vec![],
                 vec![],
@@ -434,6 +481,8 @@ impl Block {
         next_bp_hash: CryptoHash,
     ) -> Self {
         let challenges = vec![];
+        let dkg_info = Default::default();
+        let rand_reveal = vec![];
         Block {
             header: BlockHeader::genesis(
                 Block::compute_state_root(&chunks),
@@ -449,6 +498,8 @@ impl Block {
             ),
             chunks,
             challenges,
+            dkg_info,
+            rand_reveal,
         }
     }
 
@@ -460,11 +511,15 @@ impl Block {
         epoch_id: EpochId,
         next_epoch_id: EpochId,
         approvals: Vec<Approval>,
+        rand_reveal: Vec<Option<RandomShare>>,
         gas_price_adjustment_rate: u8,
         min_gas_price: Balance,
         inflation: Option<Balance>,
         challenges_result: ChallengesResult,
         challenges: Challenges,
+        dkg_info: BlockRandomnessDKGInfo,
+        dkg_in_progress: bool,
+        random_value: CryptoHash,
         signer: &dyn ValidatorSigner,
         score: BlockScore,
         last_quorum_pre_vote: CryptoHash,
@@ -521,6 +576,9 @@ impl Block {
                 time,
                 Block::compute_chunks_included(&chunks, height),
                 Block::compute_challenges_root(&challenges),
+                dkg_info.hash(),
+                dkg_in_progress,
+                random_value,
                 score,
                 validator_proposals,
                 chunk_mask,
@@ -540,6 +598,8 @@ impl Block {
             ),
             chunks,
             challenges,
+            dkg_info,
+            rand_reveal,
         }
     }
 
@@ -658,6 +718,7 @@ impl Block {
         self.header.hash()
     }
 
+    /// Validates the correctness of all the merkle proofs in the block, as well as the DKG hash.
     pub fn check_validity(&self) -> bool {
         // Check that state root stored in the header matches the state root of the chunks
         let state_root = Block::compute_state_root(&self.chunks);
@@ -696,7 +757,52 @@ impl Block {
             return false;
         }
 
+        // Check that the dkg info hash in the header corresponds to the dkg info in the block
+        if self.header.inner_rest.dkg_info_hash != self.dkg_info.hash() {
+            return false;
+        }
+
         true
+    }
+
+    /// Computes the output of the randomness beacon. The output is just the previous hash if the
+    /// DKG info is absent (which is the case in the first epoch, and then in each epoch in which
+    /// DKG didn't complete).
+    ///
+    /// Expects that all the random shares in the `rand_reveal` are already validated
+    ///
+    /// # Arguments
+    /// `num_seats` - number of seats (or, equivalently, `n` in the randomness beacon)
+    /// `is_epoch_boundary` - whether the current block is the last block in the epoch
+    /// `rand_reveal` - the actual revealed shares (must be validated by now)
+    pub fn get_next_random_value(
+        &self,
+        num_seats: NumSeats,
+        is_epoch_boundary: bool,
+        rand_reveal: &Vec<Option<RandomShare>>,
+    ) -> CryptoHash {
+        let random_epoch = match self.dkg_info.get_next_random_epoch(num_seats, is_epoch_boundary) {
+            Some(random_epoch) => random_epoch,
+            None => return self.header.hash(),
+        };
+
+        let round = RandomRound::new(&(self.hash().0).0, 0);
+
+        // The shares must be validated by now. Unwrapping is intentional, crashing the server is
+        // safer if the invariant of shares being validated by now is broken.
+        let validated_public_shares = rand_reveal
+            .iter()
+            .enumerate()
+            .filter_map(|(ord, share)| {
+                share.map(|share| (ord, random_epoch.validate_share(&round, ord, &share).unwrap()))
+            })
+            .collect::<Vec<_>>();
+
+        if validated_public_shares.len() >= (num_seats as usize) / 2 + 1 {
+            hash(&RandomEpoch::finalize(&validated_public_shares).0)
+        } else {
+            self.header.hash()
+        }
     }
 }
 

@@ -15,12 +15,19 @@ use near_chain::{
     byzantine_assert, collect_receipts, ChainStore, ChainStoreAccess, ChainStoreUpdate, ErrorKind,
     RuntimeAdapter,
 };
+use near_crypto::key_conversion::convert_public_key;
+use near_crypto::randomness::{CompressedShare, EncryptedShare};
 use near_network::types::{NetworkAdapter, PartialEncodedChunkRequestMsg};
 use near_network::NetworkRequests;
 use near_pool::{PoolIteratorWrapper, TransactionPool};
 use near_primitives::block::BlockHeader;
 use near_primitives::hash::CryptoHash;
 use near_primitives::merkle::{merklize, verify_path, MerklePath};
+use near_primitives::randomness::{
+    BlockRandomnessDKGCommitmentInfo, BlockRandomnessDKGInfo, ChunkRandomnessDkgInfoBody,
+    ChunkRandomnessDkgInfoHeader, DecryptionFailureProofWithMerkleProofs,
+    DkgEncryptedSecretShareWithMerkleProofs, RandomnessDKGPhase,
+};
 use near_primitives::receipt::Receipt;
 use near_primitives::sharding::{
     ChunkHash, EncodedShardChunk, PartialEncodedChunk, PartialEncodedChunkPart, ReceiptProof,
@@ -28,7 +35,7 @@ use near_primitives::sharding::{
 };
 use near_primitives::transaction::SignedTransaction;
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, Gas, MerkleHash, ShardId, StateRoot, ValidatorStake,
+    AccountId, Balance, BlockHeight, EpochId, Gas, MerkleHash, ShardId, StateRoot, ValidatorStake,
 };
 use near_primitives::validator_signer::ValidatorSigner;
 use near_primitives::{unwrap_option_or_return, unwrap_or_return};
@@ -73,6 +80,7 @@ struct ChunkRequestInfo {
     height: BlockHeight,
     parent_hash: CryptoHash,
     shard_id: ShardId,
+    is_dkg_commit: bool,
     added: Instant,
     last_requested: Instant,
 }
@@ -242,6 +250,9 @@ pub struct ShardsManager {
     stored_partial_encoded_chunks: HashMap<BlockHeight, HashMap<ShardId, PartialEncodedChunk>>,
 
     seals_mgr: SealsManager,
+
+    #[cfg(feature = "adversarial")]
+    pub adv_create_invalid_dkg_commit: bool,
 }
 
 impl ShardsManager {
@@ -264,6 +275,9 @@ impl ShardsManager {
             ),
             stored_partial_encoded_chunks: HashMap::new(),
             seals_mgr: SealsManager::new(me, runtime_adapter),
+
+            #[cfg(feature = "adversarial")]
+            adv_create_invalid_dkg_commit: false,
         }
     }
 
@@ -295,10 +309,12 @@ impl ShardsManager {
         parent_hash: &CryptoHash,
         shard_id: ShardId,
         chunk_hash: &ChunkHash,
+        is_dkg_commit: bool,
         force_request_full: bool,
         request_own_parts_from_others: bool,
     ) -> Result<(), Error> {
         let mut bp_to_parts = HashMap::new();
+        let mut parts_to_fetch_secret_shares = vec![];
 
         let cache_entry = self.encoded_chunks.get(chunk_hash);
 
@@ -329,42 +345,59 @@ impl ShardsManager {
 
         for part_ord in 0..self.runtime_adapter.num_total_parts() {
             let part_ord = part_ord as u64;
-            if cache_entry.map_or(false, |cache_entry| cache_entry.parts.contains_key(&part_ord)) {
-                continue;
-            }
 
-            let need_to_fetch_part = if request_full || seal.part_ords.contains(&part_ord) {
-                true
-            } else {
-                if let Some(me) = &self.me {
-                    &self.runtime_adapter.get_part_owner(&parent_hash, part_ord)? == me
+            // Fetch the part if we don't have it, and either request the full chunk, or are a part
+            // owner
+            if !cache_entry.map_or(false, |cache_entry| cache_entry.parts.contains_key(&part_ord)) {
+                let need_to_fetch_part = if request_full || seal.part_ords.contains(&part_ord) {
+                    true
                 } else {
-                    false
-                }
-            };
-
-            if need_to_fetch_part {
-                let fetch_from = self.runtime_adapter.get_part_owner(&parent_hash, part_ord)?;
-                let fetch_from = if Some(&fetch_from) == self.me.as_ref() {
-                    // If missing own part, request it from the chunk producer
-                    shard_representative_account_id.clone()
-                } else {
-                    fetch_from
+                    if let Some(me) = &self.me {
+                        &self.runtime_adapter.get_part_owner(&parent_hash, part_ord)? == me
+                    } else {
+                        false
+                    }
                 };
 
-                bp_to_parts.entry(fetch_from).or_insert_with(|| vec![]).push(part_ord);
+                if need_to_fetch_part {
+                    let fetch_from = self.runtime_adapter.get_part_owner(&parent_hash, part_ord)?;
+                    let fetch_from = if Some(&fetch_from) == self.me.as_ref() {
+                        // If missing own part, request it from the chunk producer
+                        shard_representative_account_id.clone()
+                    } else {
+                        fetch_from
+                    };
+
+                    bp_to_parts.entry(fetch_from).or_insert_with(|| vec![]).push(part_ord);
+                }
+            }
+
+            // Fetch the secret share if we don't have it
+            if is_dkg_commit {
+                if let Some(me) = &self.me {
+                    if !cache_entry
+                        .map_or(false, |cache_entry| cache_entry.dkg_shares.contains_key(&part_ord))
+                        && &self
+                            .runtime_adapter
+                            .get_next_epoch_part_owner(&parent_hash, part_ord)?
+                            == me
+                    {
+                        parts_to_fetch_secret_shares.push(part_ord);
+                    }
+                }
             }
         }
 
         let shards_to_fetch_receipts =
         // TODO: only keep shards for which we don't have receipts yet
+        //       when fixed, uncomment an assert in `dkg_chunk_requests_and_responses`
             if request_full { HashSet::new() } else { self.get_tracking_shards(&parent_hash) };
 
         // The loop below will be sending PartialEncodedChunkRequestMsg to various block producers.
         // We need to send such a message to the original chunk producer if we do not have the receipts
         //     for some subset of shards, even if we don't need to request any parts from the original
         //     chunk producer.
-        if !shards_to_fetch_receipts.is_empty() {
+        if !shards_to_fetch_receipts.is_empty() || !parts_to_fetch_secret_shares.is_empty() {
             bp_to_parts.entry(shard_representative_account_id.clone()).or_insert_with(|| vec![]);
         }
 
@@ -376,6 +409,11 @@ impl ShardsManager {
                     shards_to_fetch_receipts.clone()
                 } else {
                     HashSet::new()
+                },
+                dkg_part_ords: if account_id == shard_representative_account_id {
+                    parts_to_fetch_secret_shares.clone()
+                } else {
+                    vec![]
                 },
             };
 
@@ -429,6 +467,9 @@ impl ShardsManager {
     pub fn request_chunks(
         &mut self,
         chunks_to_request: Vec<ShardChunkHeader>,
+        signer: Option<&dyn ValidatorSigner>,
+        chain_store: &mut ChainStore,
+        rs: &ReedSolomon,
     ) -> Result<(), Error> {
         for chunk_header in chunks_to_request {
             let ShardChunkHeader {
@@ -447,6 +488,22 @@ impl ShardsManager {
                 continue;
             }
 
+            // If we have some saved chunk for this combination of height / shard_id, process it
+            // first. Ignore the error. If it fails to process, we still need to request it.
+            if let Some(shard_id_to_chunk) = self.stored_partial_encoded_chunks.get(&height) {
+                if let Some(chunk) = shard_id_to_chunk.get(&shard_id) {
+                    if chunk.chunk_hash == chunk_hash {
+                        let chunk = chunk.clone();
+                        let _ = self.process_partial_encoded_chunk(
+                            chunk,
+                            signer.clone(),
+                            chain_store,
+                            rs,
+                        );
+                    }
+                }
+            }
+
             self.encoded_chunks.get_or_insert_from_header(chunk_hash.clone(), Some(&chunk_header));
 
             self.requested_partial_encoded_chunks.insert(
@@ -455,6 +512,7 @@ impl ShardsManager {
                     height,
                     parent_hash,
                     shard_id,
+                    is_dkg_commit: chunk_header.inner.shard_dkg_info_header.is_commit(),
                     last_requested: Instant::now(),
                     added: Instant::now(),
                 },
@@ -464,6 +522,7 @@ impl ShardsManager {
                 &parent_hash,
                 shard_id,
                 &chunk_hash,
+                chunk_header.inner.shard_dkg_info_header.is_commit(),
                 false,
                 false,
             )?;
@@ -481,6 +540,7 @@ impl ShardsManager {
                 &chunk_request.parent_hash,
                 chunk_request.shard_id,
                 &chunk_hash,
+                chunk_request.is_dkg_commit,
                 chunk_request.added.elapsed()
                     > self.requested_partial_encoded_chunks.switch_to_full_fetch_duration,
                 chunk_request.added.elapsed()
@@ -640,7 +700,7 @@ impl ShardsManager {
             request.part_ords.iter().map(|part_ord| entry.parts.get(&part_ord)).collect::<Vec<_>>();
 
         if parts.iter().any(|x| x.is_none()) {
-            debug!(target:"chunks", "Not responding, some parts are missing");
+            debug!(target: "chunks", "Not responding, some parts are missing");
             return;
         }
 
@@ -653,11 +713,25 @@ impl ShardsManager {
             .collect::<Vec<_>>();
 
         if receipts.iter().any(|x| x.is_none()) {
-            debug!(target:"chunks", "Not responding, some receipts are missing");
+            debug!(target: "chunks", "Not responding, some receipts are missing");
             return;
         }
 
         let receipts = receipts.into_iter().map(|x| x.unwrap().clone()).collect::<Vec<_>>();
+
+        let encrypted_secret_shares = request
+            .dkg_part_ords
+            .iter()
+            .map(|part_ord| entry.dkg_shares.get(&part_ord))
+            .collect::<Vec<_>>();
+
+        if encrypted_secret_shares.iter().any(|x| x.is_none()) {
+            debug!(target: "chunks", "Not responding, some encrypted secret shares are missing");
+            return;
+        }
+
+        let encrypted_secret_shares =
+            encrypted_secret_shares.into_iter().map(|x| x.unwrap().clone()).collect::<Vec<_>>();
 
         let partial_encoded_chunk = PartialEncodedChunk {
             shard_id: entry.header.inner.shard_id,
@@ -665,6 +739,7 @@ impl ShardsManager {
             header: None,
             parts,
             receipts,
+            dkg_shares: encrypted_secret_shares,
         };
 
         self.network_adapter.do_send(NetworkRequests::PartialEncodedChunkResponse {
@@ -712,12 +787,18 @@ impl ShardsManager {
     pub fn decode_and_persist_encoded_chunk_if_complete(
         &mut self,
         mut encoded_chunk: EncodedShardChunk,
+        signer: Option<&dyn ValidatorSigner>,
         chain_store: &mut ChainStore,
         rs: &ReedSolomon,
     ) -> Result<bool, Error> {
         match ShardsManager::check_chunk_complete(&mut encoded_chunk, rs) {
             ChunkStatus::Complete(merkle_paths) => {
-                self.decode_and_persist_encoded_chunk(encoded_chunk, chain_store, merkle_paths)?;
+                self.decode_and_persist_encoded_chunk(
+                    encoded_chunk,
+                    merkle_paths,
+                    signer,
+                    chain_store,
+                )?;
                 Ok(true)
             }
             ChunkStatus::Incomplete => Ok(false),
@@ -732,6 +813,7 @@ impl ShardsManager {
     pub fn process_partial_encoded_chunk(
         &mut self,
         partial_encoded_chunk: PartialEncodedChunk,
+        signer: Option<&dyn ValidatorSigner>,
         chain_store: &mut ChainStore,
         rs: &ReedSolomon,
     ) -> Result<ProcessPartialEncodedChunkResult, Error> {
@@ -782,7 +864,14 @@ impl ShardsManager {
                     .all(|receipt| entry.receipts.contains_key(&receipt.1.to_shard_id));
 
                 if know_all_receipts {
-                    return Ok(ProcessPartialEncodedChunkResult::Known);
+                    let know_all_dkg_shares = partial_encoded_chunk
+                        .dkg_shares
+                        .iter()
+                        .all(|share| entry.dkg_shares.contains_key(&share.part_ord));
+
+                    if know_all_dkg_shares {
+                        return Ok(ProcessPartialEncodedChunkResult::Known);
+                    }
                 }
             }
         };
@@ -847,6 +936,34 @@ impl ShardsManager {
             }
         }
 
+        // 10. Check secret shares validity
+        if let ChunkRandomnessDkgInfoHeader::Commit { pk_merkle_root, sk_merkle_root } =
+            header.inner.shard_dkg_info_header
+        {
+            for secret_share_with_proof in partial_encoded_chunk.dkg_shares.iter() {
+                if (secret_share_with_proof.part_ord as usize) >= num_total_parts
+                    || !verify_path(
+                        sk_merkle_root,
+                        &secret_share_with_proof.secret_share_merkle_proof,
+                        &secret_share_with_proof.encrypted_secret_share,
+                    )
+                    || !verify_path(
+                        pk_merkle_root,
+                        &secret_share_with_proof.public_share_merkle_proof,
+                        &secret_share_with_proof.public_share,
+                    )
+                {
+                    byzantine_assert!(false);
+                    return Err(Error::ChainError(ErrorKind::InvalidEncryptedSecretShare.into()));
+                }
+            }
+        } else {
+            if !partial_encoded_chunk.dkg_shares.is_empty() {
+                byzantine_assert!(false);
+                return Err(Error::ChainError(ErrorKind::InvalidEncryptedSecretShare.into()));
+            }
+        }
+
         // Consider it valid
         // Store chunk hash into chunk_hash_per_height_shard collection
         let mut store_update = chain_store.store_update();
@@ -855,9 +972,20 @@ impl ShardsManager {
             header.inner.shard_id,
             chunk_hash.clone(),
         );
+
+        let dkg_challenges = self.validate_and_persist_secret_shares(
+            &header.inner.prev_block_hash,
+            &header.inner.shard_dkg_info_header,
+            &partial_encoded_chunk.dkg_shares,
+            signer.clone(),
+            &mut store_update,
+        )?;
         store_update.commit()?;
 
-        if !self.encoded_chunks.merge_in_partial_encoded_chunk(&partial_encoded_chunk) {
+        if !self
+            .encoded_chunks
+            .merge_in_partial_encoded_chunk(&partial_encoded_chunk, dkg_challenges)
+        {
             // It only returns false if a header can't be fetched
             assert!(false);
         }
@@ -866,6 +994,7 @@ impl ShardsManager {
 
         let have_all_parts = self.has_all_parts(&prev_block_hash, entry)?;
         let have_all_receipts = self.has_all_receipts(&prev_block_hash, entry)?;
+        let have_all_dkg_shares = self.has_all_dkg_secret_shares(&prev_block_hash, entry)?;
 
         let can_reconstruct = entry.parts.len() >= self.runtime_adapter.num_data_parts();
 
@@ -889,7 +1018,7 @@ impl ShardsManager {
         )?;
         let have_all_seal = seal.process(entry);
 
-        if have_all_parts && have_all_receipts && have_all_seal {
+        if have_all_parts && have_all_receipts && have_all_dkg_shares && have_all_seal {
             let cares_about_shard = self.cares_about_shard_this_or_next_epoch(
                 self.me.as_ref(),
                 &prev_block_hash,
@@ -899,6 +1028,11 @@ impl ShardsManager {
 
             if let Err(_) = chain_store.get_partial_chunk(&header.chunk_hash()) {
                 let mut store_update = chain_store.store_update();
+                self.persist_dkg_challenges(
+                    &chunk_hash,
+                    entry.dkg_challenges.values().cloned().collect(),
+                    &mut store_update,
+                );
                 self.persist_partial_chunk_for_data_availability(entry, &mut store_update);
                 store_update.commit()?;
             }
@@ -924,8 +1058,12 @@ impl ShardsManager {
                 encoded_chunk.content.parts[*part_ord as usize] = Some(part_entry.part.clone());
             }
 
-            let successfully_decoded =
-                self.decode_and_persist_encoded_chunk_if_complete(encoded_chunk, chain_store, rs)?;
+            let successfully_decoded = self.decode_and_persist_encoded_chunk_if_complete(
+                encoded_chunk,
+                signer.clone(),
+                chain_store,
+                rs,
+            )?;
 
             assert!(successfully_decoded);
 
@@ -939,6 +1077,63 @@ impl ShardsManager {
         Ok(ProcessPartialEncodedChunkResult::NeedMorePartsOrReceipts(header))
     }
 
+    /// Given a set of encrypted secret shares, validates that they match the commitment, and puts
+    /// them into the storage.
+    /// Ignores any shares that are not assigned to the current block producer, so safe to call with
+    /// a set of secret shares that was not pre-filtered.
+    ///
+    /// # Arguments
+    /// * `shard_dkg_info_header` - the header with the commitment
+    /// * `dkg_shares`            - shares to validate and persist
+    /// * `signer`                - the signer to decrypt the shares
+    /// * `store_update`          - the chain store update to store the shares
+    fn validate_and_persist_secret_shares(
+        &self,
+        prev_hash: &CryptoHash,
+        shard_dkg_info_header: &ChunkRandomnessDkgInfoHeader,
+        dkg_shares: &Vec<DkgEncryptedSecretShareWithMerkleProofs>,
+        signer: Option<&dyn ValidatorSigner>,
+        store_update: &mut ChainStoreUpdate,
+    ) -> Result<Vec<DecryptionFailureProofWithMerkleProofs>, Error> {
+        let me = if let Some(me) = &self.me { me } else { return Ok(vec![]) };
+
+        let mut dkg_challenges = vec![];
+
+        if let (ChunkRandomnessDkgInfoHeader::Commit { sk_merkle_root, .. }, Some(signer)) =
+            (shard_dkg_info_header, signer)
+        {
+            for share_with_proofs in dkg_shares.iter() {
+                let decrypted_share_or_challenge = share_with_proofs.decrypt_share(signer);
+
+                if &self
+                    .runtime_adapter
+                    .get_next_epoch_part_owner(prev_hash, share_with_proofs.part_ord)?
+                    != me
+                {
+                    continue;
+                }
+
+                match decrypted_share_or_challenge {
+                    Ok(decrypted_share) => {
+                        store_update.save_dkg_raw_secret_share(
+                            &sk_merkle_root,
+                            share_with_proofs.part_ord,
+                            CompressedShare(decrypted_share.0.to_bytes()),
+                        );
+                    }
+                    Err(decryption_failure_proof_with_merkle_proofs) => {
+                        // Even if the decryption failed, the chunk is still valid. Once the challenge
+                        // is broadcasted, the particular DKG contribution will be invalidated, but
+                        // the rest of the chunk will still be applied.
+                        dkg_challenges.push(decryption_failure_proof_with_merkle_proofs);
+                    }
+                };
+            }
+        }
+
+        Ok(dkg_challenges)
+    }
+
     fn need_receipt(&self, prev_block_hash: &CryptoHash, shard_id: ShardId) -> bool {
         self.cares_about_shard_this_or_next_epoch(
             self.me.as_ref(),
@@ -950,6 +1145,15 @@ impl ShardsManager {
 
     fn need_part(&self, prev_block_hash: &CryptoHash, part_ord: u64) -> Result<bool, Error> {
         Ok(Some(self.runtime_adapter.get_part_owner(prev_block_hash, part_ord)?) == self.me)
+    }
+
+    fn need_dkg_encrypted_secret_share(
+        &self,
+        prev_block_hash: &CryptoHash,
+        part_ord: u64,
+    ) -> Result<bool, Error> {
+        Ok(Some(self.runtime_adapter.get_next_epoch_part_owner(prev_block_hash, part_ord)?)
+            == self.me)
     }
 
     fn has_all_receipts(
@@ -984,6 +1188,53 @@ impl ShardsManager {
         Ok(true)
     }
 
+    fn has_all_dkg_secret_shares(
+        &self,
+        prev_block_hash: &CryptoHash,
+        chunk_entry: &EncodedChunksCacheEntry,
+    ) -> Result<bool, Error> {
+        if chunk_entry.header.inner.shard_dkg_info_header.is_commit() {
+            for part_ord in 0..self.runtime_adapter.num_total_parts() {
+                let part_ord = part_ord as u64;
+                if !chunk_entry.dkg_shares.contains_key(&part_ord) {
+                    if self.need_dkg_encrypted_secret_share(&prev_block_hash, part_ord)? {
+                        return Ok(false);
+                    }
+                }
+            }
+        }
+        Ok(true)
+    }
+
+    fn get_pks_for_next_epoch(
+        &self,
+        next_epoch_id: &EpochId,
+        prev_block_hash: &CryptoHash,
+    ) -> Result<Vec<near_crypto::vrf::PublicKey>, Error> {
+        let account_id_to_pk = self
+            .runtime_adapter
+            .get_epoch_block_producers_ordered(next_epoch_id, &prev_block_hash)?
+            .iter()
+            .map(|(bp, _)| (bp.account_id.clone(), bp.public_key.clone()))
+            .collect::<HashMap<_, _>>();
+
+        Ok((0..self.runtime_adapter.num_total_parts())
+            .map(|ord| {
+                Ok(convert_public_key(
+                    account_id_to_pk
+                        .get(
+                            &self
+                                .runtime_adapter
+                                .get_next_epoch_part_owner(&prev_block_hash, ord as u64)?,
+                        )
+                        .unwrap() // the part owner is guaranteed to be among the block producers
+                        .unwrap_as_ed25519(),
+                )
+                .unwrap())
+            })
+            .collect::<Result<Vec<_>, Error>>()?)
+    }
+
     pub fn create_encoded_shard_chunk(
         &mut self,
         prev_block_hash: CryptoHash,
@@ -996,15 +1247,119 @@ impl ShardsManager {
         rent_paid: Balance,
         validator_reward: Balance,
         balance_burnt: Balance,
+        prev_dkg_info: &BlockRandomnessDKGInfo,
+        prev_dkg_phase: RandomnessDKGPhase,
         validator_proposals: Vec<ValidatorStake>,
         transactions: Vec<SignedTransaction>,
         outgoing_receipts: &Vec<Receipt>,
         outgoing_receipts_root: CryptoHash,
         tx_root: CryptoHash,
         signer: &dyn ValidatorSigner,
+        store: &mut ChainStore,
         rs: &ReedSolomon,
-    ) -> Result<(EncodedShardChunk, Vec<MerklePath>), Error> {
-        EncodedShardChunk::new(
+    ) -> Result<
+        (EncodedShardChunk, Vec<MerklePath>, Vec<CompressedShare>, Vec<EncryptedShare>),
+        Error,
+    > {
+        let bp_ordinal = self.runtime_adapter.get_block_producer_ordinal(
+            &self.runtime_adapter.get_epoch_id_from_prev_block(&prev_block_hash)?,
+            &prev_block_hash,
+            self.me.as_ref().unwrap(),
+        )?;
+        let epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&prev_block_hash)?;
+        let next_epoch_id =
+            self.runtime_adapter.get_next_epoch_id_from_prev_block(&prev_block_hash)?;
+
+        // Only fetch the public keys of the other participants if we are to commit to the polynomial
+        // on this iteration
+        let target_pks =
+            if let (RandomnessDKGPhase::Commit, Some(bp_ordinal)) = (prev_dkg_phase, bp_ordinal) {
+                if !prev_dkg_info.has_info(bp_ordinal) {
+                    self.get_pks_for_next_epoch(&next_epoch_id, &prev_block_hash)?
+                } else {
+                    vec![]
+                }
+            } else {
+                vec![]
+            };
+
+        let shard_dkg_info_body = ChunkRandomnessDkgInfoBody::from_prev_dkg_info_and_public_key(
+            prev_dkg_info,
+            prev_dkg_phase,
+            bp_ordinal,
+            &convert_public_key(signer.public_key().unwrap_as_ed25519()).unwrap(),
+            &target_pks,
+        );
+
+        #[cfg(feature = "adversarial")]
+        let shard_dkg_info_body = if self.adv_create_invalid_dkg_commit {
+            let mut shard_dkg_info_body = shard_dkg_info_body;
+            if let ChunkRandomnessDkgInfoBody::Commit { encrypted_secret_shares, .. } =
+                &mut shard_dkg_info_body
+            {
+                error!("Producing an invalid DKG commit");
+                encrypted_secret_shares[0] = EncryptedShare([0; 32]);
+                self.adv_create_invalid_dkg_commit = false;
+            }
+            shard_dkg_info_body
+        } else {
+            shard_dkg_info_body
+        };
+
+        // Only fetch the validated shares iff the previous phase was `Aggregate`
+        let validated_shares = if let RandomnessDKGPhase::Aggregate(_) = prev_dkg_phase {
+            Some(
+                prev_dkg_info
+                    .commitment_infos
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(producer_ordinal, commitment_info)| {
+                        if let Some(BlockRandomnessDKGCommitmentInfo {
+                            shard_id: commitment_shard_id,
+                            public_shares_merkle_root,
+                            was_challenged,
+                            ..
+                        }) = commitment_info
+                        {
+                            if !was_challenged && commitment_shard_id == &shard_id {
+                                Some(
+                                    store
+                                        .get_dkg_committed_public_shares(
+                                            &epoch_id,
+                                            producer_ordinal as u64,
+                                            public_shares_merkle_root,
+                                        )
+                                        .map(|x| x.clone()),
+                                )
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    })
+                    .collect::<Result<Vec<_>, _>>()?,
+            )
+        } else {
+            None
+        };
+
+        let shard_dkg_info_header = match ChunkRandomnessDkgInfoHeader::from_prev_dkg_info_and_body(
+            prev_dkg_info,
+            prev_dkg_phase,
+            &shard_dkg_info_body,
+            &convert_public_key(&signer.public_key().unwrap_as_ed25519()).unwrap(),
+            validated_shares.as_ref(),
+        ) {
+            Some(x) => x,
+            None => return Err(Error::DkgError),
+        };
+
+        let (dkg_public_shares, dkg_encrypted_secret_shares) = shard_dkg_info_body
+            .get_expanded_compressed_shares_without_validation()
+            .map_err(|_| Error::InvalidChunk)?;
+
+        let (chunk, part_proofs) = EncodedShardChunk::new(
             prev_block_hash,
             prev_state_root,
             outcome_root,
@@ -1016,14 +1371,29 @@ impl ShardsManager {
             rent_paid,
             validator_reward,
             balance_burnt,
+            shard_dkg_info_header,
+            shard_dkg_info_body,
             tx_root,
             validator_proposals,
             transactions,
             outgoing_receipts,
             outgoing_receipts_root,
             signer,
-        )
-        .map_err(|err| err.into())
+        )?;
+
+        Ok((chunk, part_proofs, dkg_public_shares, dkg_encrypted_secret_shares))
+    }
+
+    pub fn persist_dkg_challenges(
+        &self,
+        _chunk_hash: &ChunkHash,
+        dkg_challenges: Vec<DecryptionFailureProofWithMerkleProofs>,
+        _store_update: &mut ChainStoreUpdate,
+    ) {
+        if !dkg_challenges.is_empty() {
+            println!("SAVING CHALLENGE! Me: {:?}", self.me); // MOO
+                                                             // MOO fill in
+        }
     }
 
     pub fn persist_partial_chunk_for_data_availability(
@@ -1062,6 +1432,23 @@ impl ShardsManager {
                     }
                 })
                 .collect(),
+            dkg_shares: chunk_entry
+                .dkg_shares
+                .iter()
+                .filter_map(|(part_ord, secret_share)| {
+                    if let Ok(need_encrypted_secret_share) =
+                        self.need_dkg_encrypted_secret_share(&prev_block_hash, *part_ord)
+                    {
+                        if need_encrypted_secret_share {
+                            Some(secret_share.clone())
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    }
+                })
+                .collect(),
         };
 
         store_update.save_partial_chunk(&chunk_entry.header.chunk_hash().clone(), partial_chunk);
@@ -1070,8 +1457,9 @@ impl ShardsManager {
     pub fn decode_and_persist_encoded_chunk(
         &mut self,
         encoded_chunk: EncodedShardChunk,
-        chain_store: &mut ChainStore,
         merkle_paths: Vec<MerklePath>,
+        signer: Option<&dyn ValidatorSigner>,
+        chain_store: &mut ChainStore,
     ) -> Result<(), Error> {
         let chunk_hash = encoded_chunk.header.chunk_hash();
 
@@ -1088,10 +1476,18 @@ impl ShardsManager {
         {
             debug!(target: "chunks", "Reconstructed and decoded chunk {}, encoded length was {}, num txs: {}, I'm {:?}", chunk_hash.0, encoded_chunk.header.inner.encoded_length, shard_chunk.transactions.len(), self.me);
 
+            let (validated_public_shares, encrypted_secret_shares) = shard_chunk
+                .shard_dkg_info
+                .get_expanded_compressed_shares_without_validation()
+                .map_err(|_| Error::InvalidChunk)?;
+
             self.create_and_persist_partial_chunk(
                 &encoded_chunk,
                 merkle_paths,
                 &shard_chunk.receipts,
+                validated_public_shares,
+                encrypted_secret_shares,
+                signer,
                 &mut store_update,
             );
 
@@ -1113,11 +1509,46 @@ impl ShardsManager {
         }
     }
 
+    fn get_public_shares_merkle_proofs(
+        encoded_chunk: &EncodedShardChunk,
+        dkg_public_shares: &Vec<CompressedShare>,
+    ) -> Vec<MerklePath> {
+        if let ChunkRandomnessDkgInfoHeader::Commit { pk_merkle_root, .. } =
+            encoded_chunk.header.inner.shard_dkg_info_header
+        {
+            let (root, proofs) = merklize(dkg_public_shares);
+            debug_assert_eq!(pk_merkle_root, root);
+            debug_assert_eq!(proofs.len(), dkg_public_shares.len());
+            proofs
+        } else {
+            vec![]
+        }
+    }
+
+    fn get_encrypted_secret_shares_merkle_proofs(
+        encoded_chunk: &EncodedShardChunk,
+        dkg_shares: &Vec<EncryptedShare>,
+    ) -> Vec<MerklePath> {
+        if let ChunkRandomnessDkgInfoHeader::Commit { sk_merkle_root, .. } =
+            encoded_chunk.header.inner.shard_dkg_info_header
+        {
+            let (root, proofs) = merklize(dkg_shares);
+            debug_assert_eq!(sk_merkle_root, root);
+            debug_assert_eq!(proofs.len(), dkg_shares.len());
+            proofs
+        } else {
+            vec![]
+        }
+    }
+
     pub fn create_and_persist_partial_chunk(
         &mut self,
         encoded_chunk: &EncodedShardChunk,
         merkle_paths: Vec<MerklePath>,
         outgoing_receipts: &Vec<Receipt>,
+        dkg_public_shares: Vec<CompressedShare>,
+        dkg_encrypted_secret_shares: Vec<EncryptedShare>,
+        signer: Option<&dyn ValidatorSigner>,
         store_update: &mut ChainStoreUpdate,
     ) {
         let shard_id = encoded_chunk.header.inner.shard_id;
@@ -1126,6 +1557,13 @@ impl ShardsManager {
         let (outgoing_receipts_root, outgoing_receipts_proofs) =
             merklize(&outgoing_receipts_hashes);
         assert_eq!(encoded_chunk.header.inner.outgoing_receipts_root, outgoing_receipts_root);
+
+        let dkg_public_share_proofs =
+            Self::get_public_shares_merkle_proofs(encoded_chunk, &dkg_public_shares);
+        let dkg_secret_share_proofs = Self::get_encrypted_secret_shares_merkle_proofs(
+            encoded_chunk,
+            &dkg_encrypted_secret_shares,
+        );
 
         // Save this chunk into encoded_chunks & process encoded chunk to add to the store.
         let cache_entry = EncodedChunksCacheEntry {
@@ -1153,7 +1591,52 @@ impl ShardsManager {
                 .into_iter()
                 .map(|receipt_proof| (receipt_proof.1.to_shard_id, receipt_proof))
                 .collect(),
+
+            dkg_shares: dkg_encrypted_secret_shares
+                .iter()
+                .zip(dkg_secret_share_proofs)
+                .zip(dkg_public_shares.iter().zip(dkg_public_share_proofs))
+                .enumerate()
+                .map(
+                    |(
+                        part_ord,
+                        (
+                            (encrypted_secret_share, secret_share_merkle_proof),
+                            (public_share, public_share_merkle_proof),
+                        ),
+                    )| {
+                        let part_ord = part_ord as u64;
+                        let public_share = public_share.clone();
+                        let encrypted_secret_share = encrypted_secret_share.clone();
+                        (
+                            part_ord,
+                            DkgEncryptedSecretShareWithMerkleProofs {
+                                part_ord,
+                                public_share,
+                                encrypted_secret_share,
+                                public_share_merkle_proof,
+                                secret_share_merkle_proof,
+                            },
+                        )
+                    },
+                )
+                .collect(),
+            dkg_challenges: HashMap::new(),
         };
+
+        // Extract secret shares, if any, store them, validate, and if needed persist resulting
+        // challegnes
+        let dkg_challenges = self
+            .validate_and_persist_secret_shares(
+                &encoded_chunk.header.inner.prev_block_hash,
+                &encoded_chunk.header.inner.shard_dkg_info_header,
+                &cache_entry.dkg_shares.values().cloned().collect(),
+                signer,
+                store_update,
+            )
+            .unwrap_or_else(|_| vec![]); // only fails if the epoch is not known, so safe to ignore the error
+
+        self.persist_dkg_challenges(&encoded_chunk.chunk_hash(), dkg_challenges, store_update);
 
         // Save the partial chunk for data availability
         self.persist_partial_chunk_for_data_availability(&cache_entry, store_update);
@@ -1167,6 +1650,9 @@ impl ShardsManager {
         encoded_chunk: EncodedShardChunk,
         merkle_paths: Vec<MerklePath>,
         outgoing_receipts: Vec<Receipt>,
+        dkg_public_shares: Vec<CompressedShare>,
+        dkg_encrypted_secret_shares: Vec<EncryptedShare>,
+        signer: &dyn ValidatorSigner,
         chain_store: &mut ChainStore,
     ) -> Result<(), Error> {
         // TODO: if the number of validators exceeds the number of parts, this logic must be changed
@@ -1176,19 +1662,47 @@ impl ShardsManager {
             self.runtime_adapter.build_receipts_hashes(&outgoing_receipts);
         let (outgoing_receipts_root, outgoing_receipts_proofs) =
             merklize(&outgoing_receipts_hashes);
-        assert_eq!(encoded_chunk.header.inner.outgoing_receipts_root, outgoing_receipts_root);
+        debug_assert_eq!(encoded_chunk.header.inner.outgoing_receipts_root, outgoing_receipts_root);
 
+        let dkg_public_share_proofs =
+            Self::get_public_shares_merkle_proofs(&encoded_chunk, &dkg_public_shares);
+        let dkg_secret_share_proofs = Self::get_encrypted_secret_shares_merkle_proofs(
+            &encoded_chunk,
+            &dkg_encrypted_secret_shares,
+        );
+
+        // Maps account_id to (part_ords, dkg_secret_shares_ords)
         let mut block_producer_mapping = HashMap::new();
 
         for part_ord in 0..self.runtime_adapter.num_total_parts() {
             let part_ord = part_ord as u64;
+
+            // Part is sent to the part owner in the current epoch
             let to_whom = self.runtime_adapter.get_part_owner(&prev_block_hash, part_ord).unwrap();
 
-            let entry = block_producer_mapping.entry(to_whom.clone()).or_insert_with(|| vec![]);
-            entry.push(part_ord);
+            let entry =
+                block_producer_mapping.entry(to_whom.clone()).or_insert_with(|| (vec![], vec![]));
+
+            entry.0.push(part_ord);
+
+            // Encrypted secret share, if any, is sent to the part owner in the next epoch
+            if let ChunkRandomnessDkgInfoHeader::Commit { .. } =
+                encoded_chunk.header.inner.shard_dkg_info_header
+            {
+                let to_whom = self
+                    .runtime_adapter
+                    .get_next_epoch_part_owner(&prev_block_hash, part_ord)
+                    .unwrap();
+
+                let entry = block_producer_mapping
+                    .entry(to_whom.clone())
+                    .or_insert_with(|| (vec![], vec![]));
+
+                entry.1.push(part_ord);
+            }
         }
 
-        for (to_whom, part_ords) in block_producer_mapping {
+        for (to_whom, (part_ords, secret_share_ords)) in block_producer_mapping {
             let tracking_shards = (0..self.runtime_adapter.num_shards())
                 .filter(|chunk_shard_id| {
                     self.cares_about_shard_this_or_next_epoch(
@@ -1206,10 +1720,23 @@ impl ShardsManager {
                 &outgoing_receipts,
                 &outgoing_receipts_proofs,
             );
+
+            let dkg_shares_with_proofs = secret_share_ords
+                .iter()
+                .map(|ord| DkgEncryptedSecretShareWithMerkleProofs {
+                    part_ord: *ord,
+                    public_share: dkg_public_shares[(*ord) as usize].clone(),
+                    encrypted_secret_share: dkg_encrypted_secret_shares[(*ord) as usize].clone(),
+                    public_share_merkle_proof: dkg_public_share_proofs[(*ord) as usize].clone(),
+                    secret_share_merkle_proof: dkg_secret_share_proofs[(*ord) as usize].clone(),
+                })
+                .collect();
+
             let partial_encoded_chunk = encoded_chunk.create_partial_encoded_chunk(
                 part_ords,
                 true,
                 part_receipt_proofs,
+                dkg_shares_with_proofs,
                 &merkle_paths,
             );
 
@@ -1225,7 +1752,12 @@ impl ShardsManager {
         self.encoded_chunks.insert_chunk_header(shard_id, encoded_chunk.header.clone());
 
         // Store the chunk in the permanent storage
-        self.decode_and_persist_encoded_chunk(encoded_chunk, chain_store, merkle_paths)?;
+        self.decode_and_persist_encoded_chunk(
+            encoded_chunk,
+            merkle_paths,
+            Some(signer),
+            chain_store,
+        )?;
 
         Ok(())
     }
