@@ -1,0 +1,12 @@
+{
+  "name": "wasm-mock-vm",
+  "version": "1.0.0",
+  "description": "Mock Near VM core logic for unit testing",
+  "main": "./pkg/wasm_mock_vm",
+  "author": "Willem Wyndham <willem@nearprotocol.com>",
+  "license": "APACHE",
+  "private": false,
+  "devDependencies": {
+    "bs58": "^4.0.1"
+  }
+}

@@ -237,6 +237,11 @@ impl<'a> VMLogic<'a> {
         self.internal_write_register(register_id, data.to_vec())
     }
 
+    /// Convenience function for testing.
+    pub fn wrapped_internal_read_register(&mut self, register_id: u64) -> Result<Vec<u8>> {
+        self.internal_read_register(register_id)
+    }
+
     /// Writes the entire content from the register `register_id` into the memory of the guest starting with `ptr`.
     ///
     /// # Arguments
