@@ -18,6 +18,7 @@ members = [
     "runtime/near-vm-runner",
     "runtime/near-vm-runner-standalone",
     "runtime/runtime-params-estimator",
+    "runtime/wasm-mock-vm",
     "chain/chain",
     "chain/chunks",
     "chain/epoch_manager",

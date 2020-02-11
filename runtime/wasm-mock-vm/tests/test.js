@@ -6,14 +6,17 @@ let bs58 = require("bs58");
 const memory = new Uint8Array(10000);
 
 // Returns whether the memory interval is completely inside the smart contract memory.
-global.fits_memory = (offset, len) => BigNum(utils.toNum(offset) + utils.toNum(len) < memory.length);
+global.fits_memory = (offset, len) => utils.toNum(offset) + utils.toNum(len) < memory.length;
 
 // Reads the content of the given memory interval.
 //
 // # Panics
 //
 // If memory interval is outside the smart contract memory.
-global.read_memory = (offset, buffer) => buffer.set(memory.slice(utils.toNum(offset), buffer.length), 0);
+global.read_memory = (offset, buffer) => {
+    offset = utils.toNum(offset)
+    buffer.set(memory.slice(offset, offset + buffer.length), 0)
+};
 
 // Reads a single byte from the memory.
 //
@@ -96,12 +99,51 @@ assert.equal(bs58.encode(Buffer.from(readReg(1))), signer_account_pk);
 debugger;
 // vm.read_register(BigInt(0), BigInt(0));
 // assert(memory[0] == 42);
-memory[1] = 84;
-vm.write_register(BigInt(0), BigInt(1), BigInt(1));
-assert.equal(readReg(1)[0], 84);
+memory[1] = 85;
+vm.write_register(BigInt(1), BigInt(1), BigInt(1));
+assert.equal(readReg(1)[0], 85);
 
-vm.input(BigNum(0));
-assert.equal(utils.UTF8toStr(readReg(1)))
+vm.input(BigInt(0));
+assert.equal(utils.UTF8toStr(readReg(0)), input);
+
+function storage_write(_key, _value) {
+    let key = utils.StrtoUTF8(_key);
+    let value = utils.StrtoUTF8(_value);
+    memory.set(key, 1000);
+    memory.set(value, 2000);
+    vm.storage_write(BigInt(key.length), BigInt(1000), BigInt(value.length), BigInt(2000), BigInt(1));
+    vm.storage_read(BigInt(key.length), BigInt(1000), BigInt(1));
+}
+
+function storage_read(_key, ptr) {
+    let key = utils.StrtoUTF8(_key);
+    memory.set(key, ptr);
+    vm.storage_read(BigInt(key.length), BigInt(ptr), BigInt(0));
+    return utils.UTF8toStr(readReg(0));
+}
+
+function storage_has_key(_key) {
+    let key = utils.StrtoUTF8(_key);
+    const saved = memory.slice(1000, 1000 + key.length);
+    memory.set(key, 1000);
+    let res = vm.storage_has_key(BigInt(key.length), BigInt(1000));
+    memory.set(saved, 1000);
+    return res;
+}
+
+const data = "I am data";
+storage_write("key", data);
+assert.equal(storage_read("key", 1000), data)
+// assert.deepEqual(utils.UTF8toStr(memory.slice(1000, 1000 + toNum(vm.register_len(BigInt(0))))), data);
+assert(storage_has_key("key") == true);
+
+var errored = false
+try {
+    vm.read_register(BigInt(10), BigInt(0));
+} catch (e){
+    errored = true;
+}
+assert(errored, "reading a unused register should cause an error");
 // vm.read_register(BigInt(0), BigInt(0));
 // assert(memory[0] == 84);
 
@@ -116,4 +158,4 @@ assert.equal(utils.UTF8toStr(readReg(1)))
 // rust.pass_context(context);
 // rust.set_context(new VMContext());
 
-debugger;
+console.log("PASSED!");

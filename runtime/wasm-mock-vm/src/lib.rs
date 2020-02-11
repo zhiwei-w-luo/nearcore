@@ -1,6 +1,6 @@
 mod mock;
 
-
+mod utils;
 // use near_vm_logic::{VMContext};
 
 // When the `wee_alloc` feature is enabled, use `wee_alloc` as the global

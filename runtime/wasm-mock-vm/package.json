@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Mock Near VM core logic for unit testing",
   "main": "./pkg/wasm_mock_vm",
+  "types": "./pkg/wasm_mock_vm.d.ts",
   "author": "Willem Wyndham <willem@nearprotocol.com>",
   "license": "APACHE",
   "private": false,
