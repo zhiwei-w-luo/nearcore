@@ -10,7 +10,7 @@ pub type ReceiptIndex = u64;
 pub type IteratorIndex = u64;
 pub type StorageUsage = u64;
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 pub enum ReturnData {
     #[serde(with = "crate::serde_with::bytes_as_str")]
     /// Method returned some value or data.
@@ -24,7 +24,7 @@ pub enum ReturnData {
     None,
 }
 
-#[derive(Debug, PartialEq, Serialize, Deserialize)]
+#[derive(Debug, PartialEq, Serialize, Deserialize, Clone)]
 /// When there is a callback attached to one or more contract calls the execution results of these
 /// calls are available to the contract invoked through the callback.
 pub enum PromiseResult {

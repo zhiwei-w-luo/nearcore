@@ -60,18 +60,46 @@ pub struct VMLogic<'a> {
     receipt_to_account: HashMap<ReceiptIndex, AccountId>,
 }
 
+pub struct InternalVMState {
+    /// Keeping track of the current account balance, which can decrease when we create promises
+    /// and attach balance to them.
+    pub current_account_balance: Balance,
+    /// Current amount of locked tokens, does not automatically change when staking transaction is
+    /// issued.
+    pub current_account_locked_balance: Balance,
+    /// Storage usage of the current account at the moment
+    pub current_storage_usage: StorageUsage,
+    /// What method returns.
+    pub return_data: ReturnData,
+    /// Logs written by the runtime.
+    pub logs: Vec<String>,
+    /// Registers can be used by the guest to store blobs of data without moving them across
+    /// host-guest boundary.
+    pub registers: HashMap<u64, Vec<u8>>,
+
+    /// Iterators that were created and can still be used.
+    pub valid_iterators: HashSet<IteratorIndex>,
+    /// Iterators that became invalidated by mutating the trie.
+    pub invalid_iterators: HashSet<IteratorIndex>,
+
+    /// The DAG of promises, indexed by promise id.
+    pub promises: Vec<Promise>,
+    /// Record the accounts towards which the receipts are directed.
+    pub receipt_to_account: HashMap<ReceiptIndex, AccountId>,
+}
+
 /// Promises API allows to create a DAG-structure that defines dependencies between smart contract
 /// calls. A single promise can be created with zero or several dependencies on other promises.
 /// * If promise was created from a receipt (using `promise_create` or `promise_then`) then
 ///   `promise_to_receipt` is `Receipt`;
 /// * If promise was created by merging several promises (using `promise_and`) then
 ///   `promise_to_receipt` is `NotReceipt` but has receipts of all promises it depends on.
-#[derive(Debug)]
-struct Promise {
+#[derive(Debug, Clone)]
+pub struct Promise {
     promise_to_receipt: PromiseToReceipts,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum PromiseToReceipts {
     Receipt(ReceiptIndex),
     NotReceipt(Vec<ReceiptIndex>),
@@ -133,6 +161,50 @@ impl<'a> VMLogic<'a> {
             promises: vec![],
             receipt_to_account: HashMap::new(),
         }
+    }
+
+    pub fn save_state(&self) -> InternalVMState {
+        InternalVMState {
+            /// Keeping track of the current account balance, which can decrease when we create promises
+            /// and attach balance to them.
+            current_account_balance: self.current_account_balance.clone(),
+            /// Current amount of locked tokens, does not automatically change when staking transaction is
+            /// issued.
+            current_account_locked_balance: self.current_account_locked_balance.clone(),
+            /// Storage usage of the current account at the moment
+            current_storage_usage: self.current_storage_usage.clone(),
+            /// What method returns.
+            return_data: self.return_data.clone(),
+            /// Logs written by the runtime.
+            logs: self.logs.clone(),
+            /// Registers can be used by the guest to store blobs of data without moving them across
+            /// host-guest boundary.
+            registers: self.registers.clone(),
+
+            /// Iterators that were created and can still be used.
+            valid_iterators: self.valid_iterators.clone(),
+            /// Iterators that became invalidated by mutating the trie.
+            invalid_iterators: self.invalid_iterators.clone(),
+
+            /// The DAG of promises, indexed by promise id.
+            promises: self.promises.clone(),
+            /// Record the accounts towards which the receipts are directed.
+            receipt_to_account: self.receipt_to_account.clone(),
+        }
+    }
+
+    pub fn restore_state(&mut self, state: &InternalVMState) {
+        
+        self.current_account_balance = state.current_account_balance;
+        self.current_account_locked_balance = state.current_account_locked_balance.clone();
+        self.current_storage_usage = state.current_storage_usage.clone();
+        self.return_data = state.return_data.clone();
+        self.logs = state.logs.clone();
+        self.registers = state.registers.clone();
+        self.valid_iterators = state.valid_iterators.clone();
+        self.invalid_iterators = state.invalid_iterators.clone();
+        self.promises = state.promises.clone();
+        self.receipt_to_account = state.receipt_to_account.clone();
     }
 
     // ###########################

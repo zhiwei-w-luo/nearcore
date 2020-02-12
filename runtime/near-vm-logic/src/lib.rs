@@ -11,7 +11,7 @@ pub mod types;
 pub use config::{ExtCosts, ExtCostsConfig, VMConfig};
 pub use context::VMContext;
 pub use dependencies::{External, MemoryLike, ValuePtr};
-pub use logic::{VMLogic, VMOutcome};
+pub use logic::{VMLogic, VMOutcome, InternalVMState};
 pub use near_vm_errors::{HostError, HostErrorOrStorageError};
 pub use types::ReturnData;
 

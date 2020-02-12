@@ -13,6 +13,7 @@ use wasm_bindgen::prelude::*;
 use near_runtime_fees::RuntimeFeesConfig;
 use web_sys::console;
 use crate::utils::*;
+use std::panic::*;
 
 
 
@@ -80,7 +81,8 @@ pub struct SimpleState {
 struct VM {
     builder: VMLogicBuilder,
     state: SimpleState,
-    context: VMContext
+    context: VMContext,
+    internalState: Option<InternalVMState>
 }
 
 
@@ -92,23 +94,20 @@ impl VM {
         Self {
             builder: VMLogicBuilder::free(),
             state: serde_wasm_bindgen::from_value(state).unwrap(),
-            context: serde_wasm_bindgen::from_value(context).unwrap()
+            context: serde_wasm_bindgen::from_value(context).unwrap(),
+            internalState: None
         }
     }
 
     fn runVM<T, F: FnOnce(&mut VMLogic) -> VMResult<T>>(&mut self, f: F, register_id: Option<u64>) -> VMResult<T> {
         let mut vm = self.builder.build(self.context.clone());
-        for (id, data) in &self.state.registers {
-            vm.wrapped_internal_write_register(*id, &data);
+        if self.internalState.is_some() {
+            vm.restore_state(self.internalState.as_ref().unwrap());
         }
         let res: VMResult<T> = f(&mut vm);
-        match register_id {
-            Some(id) => {
-                let arr = vm.wrapped_internal_read_register(id).unwrap();
-                self.state.registers.insert(id, arr.clone());
-            },
-            None => ()
-        };
+        if res.is_ok() {
+            self.internalState = Some(vm.save_state());
+        }
         res
     }
 
@@ -142,7 +141,7 @@ impl VM {
         let res = self.runVM(|vm| vm.read_register(register_id, ptr), None);
         match res {
             Ok(()) => (),
-            Err(HostErrorOrStorageError::HostError(e)) => panic!("{}", e),
+            Err(HostErrorOrStorageError::HostError(e)) => console::log_1(&"Host Error".into()),
             Err(HostErrorOrStorageError::StorageError(e)) => panic!(e)
             
         }
@@ -1096,7 +1095,7 @@ impl VM {
    /// `base + storage_iter_create_prefix_base + storage_iter_create_key_byte * num_prefix_bytes
    ///  cost of reading the prefix`.
     pub fn storage_iter_prefix(&mut self, prefix_len: u64, prefix_ptr: u64) -> u64 {
-        self.runVM(|vm| vm.storage_iter_prefix(prefix_len, prefix_ptr), None).unwrap()
+        self.runVM(|vm| vm.storage_iter_prefix(prefix_len, prefix_ptr), None); 0
     }
    /// Iterates over all key-values such that keys are between `start` and `end`, where `start` is
    /// inclusive and `end` is exclusive. Unless lexicographically `start < end`, it creates an
@@ -1155,7 +1154,11 @@ impl VM {
         key_register_id: u64,
         value_register_id: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.storage_iter_next(iterator_id, key_register_id, value_register_id), None).unwrap()
+        match self.runVM(|vm| vm.storage_iter_next(iterator_id, key_register_id, value_register_id), None) {
+            Ok(i) => i,
+            Err(e) => 0,
+            // Err(e) => panic!(e)
+        }
     }
 
    // Computes the outcome of execution.

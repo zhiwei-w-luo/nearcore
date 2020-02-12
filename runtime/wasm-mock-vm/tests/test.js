@@ -138,12 +138,9 @@ assert.equal(storage_read("key", 1000), data)
 assert(storage_has_key("key") == true);
 
 var errored = false
-try {
-    vm.read_register(BigInt(10), BigInt(0));
-} catch (e){
-    errored = true;
-}
-assert(errored, "reading a unused register should cause an error");
+vm.read_register(BigInt(10), BigInt(0));
+vm.storage_iter_next(BigInt(0), BigInt(0), BigInt(0));
+
 // vm.read_register(BigInt(0), BigInt(0));
 // assert(memory[0] == 84);
 
