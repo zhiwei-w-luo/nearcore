@@ -1,11 +1,5 @@
-// use crate::mock::context::new_vm_context;
 use near_vm_logic::mocks::mock_external::MockedExternal;
 use crate::mock::memory::*;
-// use ::std::cell::RefCell;
-use serde::{Deserialize, Serialize};
-// use serde_wasm_bindgen::Error;
-use std::collections::HashMap;
-
 use near_vm_logic::types::*;
 use near_vm_logic::*;
 use wasm_bindgen::prelude::*;
@@ -13,7 +7,6 @@ use wasm_bindgen::prelude::*;
 use near_runtime_fees::RuntimeFeesConfig;
 use web_sys::console;
 use crate::utils::*;
-use std::panic::*;
 
 
 
@@ -64,49 +57,48 @@ impl VMLogicBuilder {
     }
 }
 
-
-#[derive(Default, Clone)]
-struct SimpleContext {
-    pub input: Vec<u8>,
-}
-
-#[derive(Serialize, Deserialize, Default, Clone)]
-pub struct SimpleState {
-    registers: HashMap<u64, Vec<u8>>,
-}
-
-
-
 #[wasm_bindgen]
-struct VM {
+pub struct VM {
     builder: VMLogicBuilder,
-    state: SimpleState,
     context: VMContext,
-    internalState: Option<InternalVMState>
+    internal_state: Option<InternalVMState>,
+    saved_state: Option<InternalVMState>
 }
 
 
 #[wasm_bindgen]
 impl VM {
     #[wasm_bindgen(constructor)]
-    pub fn new(state: JsValue, context: JsValue) -> Self {
+    pub fn new(context: JsValue) -> Self {
         set_panic_hook();
         Self {
             builder: VMLogicBuilder::free(),
-            state: serde_wasm_bindgen::from_value(state).unwrap(),
             context: serde_wasm_bindgen::from_value(context).unwrap(),
-            internalState: None
+            internal_state: None,
+            saved_state: None
         }
     }
 
-    fn runVM<T, F: FnOnce(&mut VMLogic) -> VMResult<T>>(&mut self, f: F, register_id: Option<u64>) -> VMResult<T> {
+    pub fn save_state(&mut self) {
+        self.saved_state = self.internal_state.clone();
+    }
+
+    pub fn restore_state(&mut self) {
+        self.internal_state = self.saved_state.clone();
+    }
+
+    pub fn setContext(&mut self, context: JsValue) {
+        self.context = serde_wasm_bindgen::from_value(context).unwrap()
+    }
+
+    fn run_vm<T, F: FnOnce(&mut VMLogic) -> VMResult<T>>(&mut self, f: F) -> VMResult<T> {
         let mut vm = self.builder.build(self.context.clone());
-        if self.internalState.is_some() {
-            vm.restore_state(self.internalState.as_ref().unwrap());
+        if self.internal_state.is_some() {
+            vm.restore_state(self.internal_state.as_ref().unwrap());
         }
         let res: VMResult<T> = f(&mut vm);
         if res.is_ok() {
-            self.internalState = Some(vm.save_state());
+            self.internal_state = Some(vm.save_state());
         }
         res
     }
@@ -138,10 +130,10 @@ impl VM {
     pub fn read_register(&mut self, register_id: u64, ptr: u64) {
         // let data = &vec![42];
         // vm.wrapped_internal_write_register(register_id, &data);
-        let res = self.runVM(|vm| vm.read_register(register_id, ptr), None);
+        let res = self.run_vm(|vm| vm.read_register(register_id, ptr));
         match res {
             Ok(()) => (),
-            Err(HostErrorOrStorageError::HostError(e)) => console::log_1(&"Host Error".into()),
+            Err(HostErrorOrStorageError::HostError(_e)) => console::log_1(&"Host Error".into()),
             Err(HostErrorOrStorageError::StorageError(e)) => panic!(e)
             
         }
@@ -159,7 +151,7 @@ impl VM {
     //
     // `base`
     pub fn register_len(&mut self, register_id: u64) -> u64 {
-        self.runVM(|vm| vm.register_len(register_id), None).unwrap_or(std::u64::MAX)
+        self.run_vm(|vm| vm.register_len(register_id)).unwrap_or(std::u64::MAX)
     }
 
     // Copies `data` from the guest memory into the register. If register is unused will initialize
@@ -176,7 +168,7 @@ impl VM {
     //
     // `base + read_memory_base + read_memory_bytes * num_bytes + write_register_base + write_register_bytes * num_bytes`
     pub fn write_register(&mut self, register_id: u64, data_len: u64, data_ptr: u64) -> () {
-        self.runVM(|vm| vm.write_register(register_id, data_len, data_ptr), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.write_register(register_id, data_len, data_ptr)).unwrap()
     }
    /// ###################################
    /// # String reading helper functions #
@@ -227,7 +219,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`
     pub fn current_account_id(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.current_account_id(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.current_account_id(register_id)).unwrap()
     }
    /// All contract calls are a result of some transaction that was signed by some account using
    /// some access key and submitted into a memory pool (either through the wallet using RPC or by
@@ -243,7 +235,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`
     pub fn signer_account_id(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.signer_account_id(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.signer_account_id(register_id)).unwrap()
     }
    /// Saves the public key fo the access key that was used by the signer into the register. In
    /// rare situations smart contract might want to know the exact access key that was used to send
@@ -258,7 +250,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`
     pub fn signer_account_pk(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.signer_account_pk(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.signer_account_pk(register_id)).unwrap()
     }
    /// All contract calls are a result of a receipt, this receipt might be created by a transaction
    /// that does function invocation on the contract or another contract as a result of
@@ -273,7 +265,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`
     pub fn predecessor_account_id(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.predecessor_account_id(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.predecessor_account_id(register_id)).unwrap()
     }
    /// Reads input to the contract call into the register. Input is expected to be in JSON-format.
    /// If input is provided saves the bytes (potentially zero) of input into register. If input is
@@ -283,7 +275,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`
     pub fn input(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.input(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.input(register_id)).unwrap()
     }
    /// Returns the current block height.
    ///
@@ -292,7 +284,7 @@ impl VM {
    /// `base`
    /// TODO #1903 rename to `block_height`
     pub fn block_index(&mut self) -> u64 {
-        self.runVM(|vm| vm.block_index(), None).unwrap()
+        self.run_vm(|vm| vm.block_index()).unwrap()
     }
    /// Returns the current block timestamp.
    ///
@@ -300,7 +292,7 @@ impl VM {
    ///
    /// `base`
     pub fn block_timestamp(&mut self) -> u64 {
-        self.runVM(|vm| vm.block_timestamp(), None).unwrap()
+        self.run_vm(|vm| vm.block_timestamp()).unwrap()
     }
    /// Returns the number of bytes used by the contract if it was saved to the trie as of the
    /// invocation. This includes:
@@ -313,7 +305,7 @@ impl VM {
    ///
    /// `base`
     pub fn storage_usage(&mut self) -> StorageUsage {
-        self.runVM(|vm| vm.storage_usage(), None).unwrap()
+        self.run_vm(|vm| vm.storage_usage()).unwrap()
     }
    /// #################
    /// # Economics API #
@@ -326,7 +318,7 @@ impl VM {
    ///
    /// `base + memory_write_base + memory_write_size * 16`
     pub fn account_balance(&mut self, balance_ptr: u64) -> () {
-        self.runVM(|vm| vm.account_balance(balance_ptr), None).unwrap()
+        self.run_vm(|vm| vm.account_balance(balance_ptr)).unwrap()
     }
    /// The current amount of tokens locked due to staking.
    ///
@@ -334,7 +326,7 @@ impl VM {
    ///
    /// `base + memory_write_base + memory_write_size * 16`
     pub fn account_locked_balance(&mut self, balance_ptr: u64) -> () {
-        self.runVM(|vm| vm.account_locked_balance(balance_ptr), None).unwrap()
+        self.run_vm(|vm| vm.account_locked_balance(balance_ptr)).unwrap()
     }
    /// The balance that was attached to the call that will be immediately deposited before the
    /// contract execution starts.
@@ -347,7 +339,7 @@ impl VM {
    ///
    /// `base + memory_write_base + memory_write_size * 16`
     pub fn attached_deposit(&mut self, balance_ptr: u64) -> () {
-        self.runVM(|vm| vm.attached_deposit(balance_ptr), None).unwrap()
+        self.run_vm(|vm| vm.attached_deposit(balance_ptr)).unwrap()
     }
    /// The amount of gas attached to the call that can be used to pay for the gas fees.
    ///
@@ -359,7 +351,7 @@ impl VM {
    ///
    /// `base`
     pub fn prepaid_gas(&mut self) -> Gas {
-        self.runVM(|vm| vm.prepaid_gas(), None).unwrap()
+        self.run_vm(|vm| vm.prepaid_gas()).unwrap()
     }
    /// The gas that was already burnt during the contract execution (cannot exceed `prepaid_gas`)
    ///
@@ -371,7 +363,7 @@ impl VM {
    ///
    /// `base`
     pub fn used_gas(&mut self) -> Gas {
-        self.runVM(|vm| vm.used_gas(), None).unwrap()
+        self.run_vm(|vm| vm.used_gas()).unwrap()
     }
    /// ############
    /// # Math API #
@@ -387,7 +379,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes`.
     pub fn random_seed(&mut self, register_id: u64) -> () {
-        self.runVM(|vm| vm.random_seed(register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.random_seed(register_id)).unwrap()
     }
    /// Hashes the random sequence of bytes using sha256 and returns it into `register_id`.
    ///
@@ -400,7 +392,7 @@ impl VM {
    ///
    /// `base + write_register_base + write_register_byte * num_bytes + sha256_base + sha256_byte * num_bytes`
     pub fn sha256(&mut self, value_len: u64, value_ptr: u64, register_id: u64) -> () {
-        self.runVM(|vm| vm.sha256(value_len, value_ptr, register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.sha256(value_len, value_ptr, register_id)).unwrap()
         
     }
    /// Called by gas metering injected into Wasm. Counts both towards `burnt_gas` and `used_gas`.
@@ -411,7 +403,7 @@ impl VM {
    /// * If we exceed usage limit imposed on burnt gas returns `GasLimitExceeded`;
    /// * If we exceed the `prepaid_gas` then returns `GasExceeded`.
     pub fn gas(&mut self, gas_amount: u32) -> () {
-        self.runVM(|vm| vm.gas(gas_amount), None).unwrap()
+        self.run_vm(|vm| vm.gas(gas_amount)).unwrap()
     }
 
    /// ################
@@ -467,7 +459,7 @@ impl VM {
         amount_ptr: u64,
         gas: Gas,
     ) -> u64 {
-        self.runVM(|vm| vm.promise_create(
+        self.run_vm(|vm| vm.promise_create(
             account_id_len,
             account_id_ptr,
             method_name_len,
@@ -475,7 +467,7 @@ impl VM {
             arguments_len,
             arguments_ptr,
             amount_ptr,
-            gas), None).unwrap()
+            gas)).unwrap()
     }
 
    /// Attaches the callback that is executed after promise pointed by `promise_idx` is complete.
@@ -509,7 +501,7 @@ impl VM {
         amount_ptr: u64,
         gas: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.promise_then(
+        self.run_vm(|vm| vm.promise_then(
             promise_idx,
             account_id_len,
             account_id_ptr,
@@ -519,7 +511,7 @@ impl VM {
             arguments_ptr,
             amount_ptr,
             gas,
-        ), None).unwrap()
+        )).unwrap()
     }
 
    /// Creates a new promise which completes when time all promises passed as arguments complete.
@@ -548,7 +540,7 @@ impl VM {
         promise_idx_ptr: u64,
         promise_idx_count: u64,
     ) -> PromiseIndex {
-        self.runVM(|vm| vm.promise_and(promise_idx_ptr, promise_idx_count), None).unwrap()
+        self.run_vm(|vm| vm.promise_and(promise_idx_ptr, promise_idx_count)).unwrap()
     }
 
    /// Creates a new promise towards given `account_id` without any actions attached to it.
@@ -573,7 +565,7 @@ impl VM {
         account_id_len: u64,
         account_id_ptr: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.promise_batch_create(account_id_len, account_id_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_create(account_id_len, account_id_ptr)).unwrap()
     }
 
    /// Creates a new promise towards given `account_id` without any actions attached, that is
@@ -601,7 +593,7 @@ impl VM {
         account_id_len: u64,
         account_id_ptr: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.promise_batch_then(promise_idx, account_id_len, account_id_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_then(promise_idx, account_id_len, account_id_ptr)).unwrap()
     }
 
    /// Appends `CreateAccount` action to the batch of actions for the given promise pointed by
@@ -619,7 +611,7 @@ impl VM {
    /// `burnt_gas := base + dispatch action fee`
    /// `used_gas := burnt_gas + exec action fee`
     pub fn promise_batch_action_create_account(&mut self, promise_idx: u64) -> () {
-        self.runVM(|vm| vm.promise_batch_action_create_account(promise_idx), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_create_account(promise_idx)).unwrap()
     }
    /// Appends `DeployContract` action to the batch of actions for the given promise pointed by
    /// `promise_idx`.
@@ -643,7 +635,7 @@ impl VM {
         code_len: u64,
         code_ptr: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_deploy_contract(promise_idx, code_len, code_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_deploy_contract(promise_idx, code_len, code_ptr)).unwrap()
     }
 
    /// Appends `FunctionCall` action to the batch of actions for the given promise pointed by
@@ -674,7 +666,7 @@ impl VM {
         amount_ptr: u64,
         gas: Gas,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_function_call(promise_idx, method_name_len, method_name_ptr, arguments_len, arguments_ptr, amount_ptr, gas), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_function_call(promise_idx, method_name_len, method_name_ptr, arguments_len, arguments_ptr, amount_ptr, gas)).unwrap()
     }
 
    /// Appends `Transfer` action to the batch of actions for the given promise pointed by
@@ -698,7 +690,7 @@ impl VM {
         promise_idx: u64,
         amount_ptr: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_transfer(promise_idx, amount_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_transfer(promise_idx, amount_ptr)).unwrap()
     }
 
    /// Appends `Stake` action to the batch of actions for the given promise pointed by
@@ -725,7 +717,7 @@ impl VM {
         public_key_len: u64,
         public_key_ptr: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_stake(promise_idx, amount_ptr, public_key_len, public_key_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_stake(promise_idx, amount_ptr, public_key_len, public_key_ptr)).unwrap()
     }
 
    /// Appends `AddKey` action to the batch of actions for the given promise pointed by
@@ -752,7 +744,7 @@ impl VM {
         public_key_ptr: u64,
         nonce: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_add_key_with_full_access(promise_idx, public_key_len, public_key_ptr, nonce), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_add_key_with_full_access(promise_idx, public_key_len, public_key_ptr, nonce)).unwrap()
     }
 
    /// Appends `AddKey` action to the batch of actions for the given promise pointed by
@@ -786,7 +778,7 @@ impl VM {
         method_names_len: u64,
         method_names_ptr: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_add_key_with_function_call(
+        self.run_vm(|vm| vm.promise_batch_action_add_key_with_function_call(
             promise_idx,
             public_key_len,
             public_key_ptr,
@@ -796,7 +788,7 @@ impl VM {
             receiver_id_ptr,
             method_names_len,
             method_names_ptr,
-        ), None).unwrap()
+        )).unwrap()
 
     }
 
@@ -823,7 +815,7 @@ impl VM {
         public_key_len: u64,
         public_key_ptr: u64,
     ) -> () {
-        self.runVM(|vm| vm.promise_batch_action_delete_key(promise_idx, public_key_len, public_key_ptr), None).unwrap()
+        self.run_vm(|vm| vm.promise_batch_action_delete_key(promise_idx, public_key_len, public_key_ptr)).unwrap()
     }
 
    /// Appends `DeleteAccount` action to the batch of actions for the given promise pointed by
@@ -848,7 +840,7 @@ impl VM {
         beneficiary_id_len: u64,
         beneficiary_id_ptr: u64,
     ) -> () {
-       self.runVM(|vm| vm.promise_batch_action_delete_account(promise_idx, beneficiary_id_len, beneficiary_id_ptr), None).unwrap()
+       self.run_vm(|vm| vm.promise_batch_action_delete_account(promise_idx, beneficiary_id_len, beneficiary_id_ptr)).unwrap()
     }
 
    /// If the current function is invoked by a callback we can access the execution results of the
@@ -866,7 +858,7 @@ impl VM {
    ///
    /// `base`
     pub fn promise_results_count(&mut self) -> u64 {
-        self.runVM(|vm| vm.promise_results_count(), None).unwrap()
+        self.run_vm(|vm| vm.promise_results_count()).unwrap()
     }
    /// If the current function is invoked by a callback we can access the execution results of the
    /// promises that caused the callback. This function returns the result in blob format and
@@ -891,7 +883,7 @@ impl VM {
    ///
    /// `base + cost of writing data into a register`
     pub fn promise_result(&mut self, result_idx: u64, register_id: u64) -> u64 {
-        self.runVM(|vm| vm.promise_result(result_idx, register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.promise_result(result_idx, register_id)).unwrap()
     }
    /// When promise `promise_idx` finishes executing its result is considered to be the result of
    /// the current function.
@@ -905,7 +897,7 @@ impl VM {
    ///
    /// `base + promise_return`
     pub fn promise_return(&mut self, promise_idx: u64) -> () {
-        self.runVM(|vm| vm.promise_return(promise_idx), None).unwrap()
+        self.run_vm(|vm| vm.promise_return(promise_idx)).unwrap()
     }
    /// #####################
    /// # Miscellaneous API #
@@ -921,7 +913,7 @@ impl VM {
    /// # Cost
    /// `base + cost of reading return value from memory or register + dispatch&exec cost per byte of the data sent * num data receivers`
     pub fn value_return(&mut self, value_len: u64, value_ptr: u64) -> () {
-        self.runVM(|vm| vm.value_return(value_len, value_ptr), None).unwrap()
+        self.run_vm(|vm| vm.value_return(value_len, value_ptr)).unwrap()
     }
    /// Terminates the execution of the program with panic `GuestPanic`.
    ///
@@ -929,7 +921,7 @@ impl VM {
    ///
    /// `base`
     pub fn panic(&mut self) -> () {
-        self.runVM(|vm| vm.panic(), None).unwrap()
+        self.run_vm(|vm| vm.panic()).unwrap()
     }
    /// Guest panics with the UTF-8 encoded string.
    /// If `len == u64::MAX` then treats the string as null-terminated with character `'\0'`.
@@ -943,7 +935,7 @@ impl VM {
    /// # Cost
    /// `base + cost of reading and decoding a utf8 string`
     pub fn panic_utf8(&mut self, len: u64, ptr: u64) -> () {
-        self.runVM(|vm| vm.panic_utf8(len, ptr), None).unwrap()
+        self.run_vm(|vm| vm.panic_utf8(len, ptr)).unwrap()
     }
    /// Logs the UTF-8 encoded string.
    /// If `len == u64::MAX` then treats the string as null-terminated with character `'\0'`.
@@ -958,7 +950,7 @@ impl VM {
    ///
    /// `base + log_base + log_byte + num_bytes + utf8 decoding cost`
     pub fn log_utf8(&mut self, len: u64, ptr: u64) -> () {
-        self.runVM(|vm| vm.log_utf8(len, ptr), None).unwrap()
+        self.run_vm(|vm| vm.log_utf8(len, ptr)).unwrap()
     }
    /// Logs the UTF-16 encoded string. If `len == u64::MAX` then treats the string as
    /// null-terminated with two-byte sequence of `0x00 0x00`.
@@ -972,7 +964,7 @@ impl VM {
    ///
    /// `base + log_base + log_byte * num_bytes + utf16 decoding cost`
     pub fn log_utf16(&mut self, len: u64, ptr: u64) -> () {
-        self.runVM(|vm| vm.log_utf16(len, ptr), None).unwrap()
+        self.run_vm(|vm| vm.log_utf16(len, ptr)).unwrap()
     }
    /// Special import kept for compatibility with AssemblyScript contracts. Not called by smart
    /// contracts directly, but instead called by the code generated by AssemblyScript.
@@ -981,7 +973,7 @@ impl VM {
    ///
    /// `base +  log_base + log_byte * num_bytes + utf16 decoding cost`
     pub fn abort(&mut self, msg_ptr: u32, filename_ptr: u32, line: u32, col: u32) -> () {
-        self.runVM(|vm| vm.abort(msg_ptr, filename_ptr, line, col), None).unwrap()
+        self.run_vm(|vm| vm.abort(msg_ptr, filename_ptr, line, col)).unwrap()
     }
    /// ###############
    /// # Storage API #
@@ -1024,7 +1016,7 @@ impl VM {
         value_ptr: u64,
         register_id: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.storage_write(key_len, key_ptr, value_len, value_ptr, register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.storage_write(key_len, key_ptr, value_len, value_ptr, register_id)).unwrap()
     }
 
    /// Reads the value stored under the given key.
@@ -1044,7 +1036,7 @@ impl VM {
    /// `base + storage_read_base + storage_read_key_byte * num_key_bytes + storage_read_value_byte + num_value_bytes
    ///  cost to read key from register + cost to write value into register`.
     pub fn storage_read(&mut self, key_len: u64, key_ptr: u64, register_id: u64) -> u64 {
-        self.runVM(|vm| vm.storage_read(key_len, key_ptr, register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.storage_read(key_len, key_ptr, register_id)).unwrap()
     }
    /// Removes the value stored under the given key.
    /// * If key is used, removes the key-value from the trie and copies the content of the value
@@ -1064,7 +1056,7 @@ impl VM {
    /// `base + storage_remove_base + storage_remove_key_byte * num_key_bytes + storage_remove_ret_value_byte * num_value_bytes
    /// + cost to read the key + cost to write the value`.
     pub fn storage_remove(&mut self, key_len: u64, key_ptr: u64, register_id: u64) -> u64 {
-        self.runVM(|vm| vm.storage_remove(key_len, key_ptr, register_id), Some(register_id)).unwrap()
+        self.run_vm(|vm| vm.storage_remove(key_len, key_ptr, register_id)).unwrap()
     }
     /// Checks if there is a key-value pair.
     /// * If key is used returns `1`, even if the value is zero bytes;
@@ -1078,7 +1070,7 @@ impl VM {
     ///
     /// `base + storage_has_key_base + storage_has_key_byte * num_bytes + cost of reading key`
     pub fn storage_has_key(&mut self, key_len: u64, key_ptr: u64) -> u64 {
-        self.runVM(|vm| vm.storage_has_key(key_len, key_ptr), None).unwrap()
+        self.run_vm(|vm| vm.storage_has_key(key_len, key_ptr)).unwrap()
     }
    /// Creates an iterator object inside the host. Returns the identifier that uniquely
    /// differentiates the given iterator from other iterators that can be simultaneously created.
@@ -1095,7 +1087,7 @@ impl VM {
    /// `base + storage_iter_create_prefix_base + storage_iter_create_key_byte * num_prefix_bytes
    ///  cost of reading the prefix`.
     pub fn storage_iter_prefix(&mut self, prefix_len: u64, prefix_ptr: u64) -> u64 {
-        self.runVM(|vm| vm.storage_iter_prefix(prefix_len, prefix_ptr), None); 0
+        self.run_vm(|vm| vm.storage_iter_prefix(prefix_len, prefix_ptr)).unwrap()
     }
    /// Iterates over all key-values such that keys are between `start` and `end`, where `start` is
    /// inclusive and `end` is exclusive. Unless lexicographically `start < end`, it creates an
@@ -1118,7 +1110,7 @@ impl VM {
         end_len: u64,
         end_ptr: u64,
     ) -> u64 {
-        self.runVM(|vm| vm.storage_iter_range(start_len, start_ptr, end_len, end_ptr), None).unwrap()
+        self.run_vm(|vm| vm.storage_iter_range(start_len, start_ptr, end_len, end_ptr)).unwrap()
     }
 
    /// Advances iterator and saves the next key and value in the register.
@@ -1154,15 +1146,15 @@ impl VM {
         key_register_id: u64,
         value_register_id: u64,
     ) -> u64 {
-        match self.runVM(|vm| vm.storage_iter_next(iterator_id, key_register_id, value_register_id), None) {
-            Ok(i) => i,
-            Err(e) => 0,
-            // Err(e) => panic!(e)
-        }
+        self.run_vm(|vm| vm.storage_iter_next(iterator_id, key_register_id, value_register_id)).unwrap()
+        //     Ok(i) => i,
+        //     Err(_e) => 0,
+        //     // Err(e) => panic!(e)
+        // }
     }
 
    // Computes the outcome of execution.
     // pub fn outcome(self) -> VMOutcome {
-    //     self.runVM(|vm| vm.outcome(), None).unwrap()
+    //     self.run_vm(|vm| vm.outcome()).unwrap()
     // }
 }

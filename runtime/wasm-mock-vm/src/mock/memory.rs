@@ -34,18 +34,18 @@ pub struct MockedMemory {}
 
 impl MemoryLike for MockedMemory {
     fn fits_memory(&self, _offset: u64, _len: u64) -> bool {
-        return fits_memory(_offset, _len);
+        fits_memory(_offset, _len)
     }
     
     fn read_memory(&self, offset: u64, buffer: &mut [u8]) {
-        read_memory(offset, buffer);
+        read_memory(offset, buffer)
     }
     
     fn read_memory_u8(&self, offset: u64) -> u8 {
-        return read_memory_u8(offset);
+        read_memory_u8(offset)
     }
     
     fn write_memory(&mut self, offset: u64, buffer: &[u8]) {
-        write_memory(offset, buffer);
+        write_memory(offset, buffer)
     }
 }

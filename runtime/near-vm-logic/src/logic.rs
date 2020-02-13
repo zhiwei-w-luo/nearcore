@@ -60,6 +60,7 @@ pub struct VMLogic<'a> {
     receipt_to_account: HashMap<ReceiptIndex, AccountId>,
 }
 
+#[derive(Clone)]
 pub struct InternalVMState {
     /// Keeping track of the current account balance, which can decrease when we create promises
     /// and attach balance to them.

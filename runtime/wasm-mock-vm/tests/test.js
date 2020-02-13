@@ -34,9 +34,6 @@ global.write_memory = (offset, buffer) => {
     memory.set(buffer, utils.toNum(offset));
 }
 
-let map = new Map();
-map.set(0, new Uint8Array([42]));
-
 const current_account_id = "alice"; 
 const signer_account_id = "bob";
 const signer_account_pk = "HuxUynD5GdrcZ5MauxJuu74sGHgS6wLfCqqhQkLWK";
@@ -92,7 +89,7 @@ function readReg(id) {
 
 // let map = new Array();
 // map[0] = [0, new Uint8Array([42])];
-let vm = new rust.VM({registers: map}, context);
+let vm = new rust.VM(context);
 vm.signer_account_pk(BigInt(1));
 // vm.read_register(BigInt(1), BigInt(1));
 assert.equal(bs58.encode(Buffer.from(readReg(1))), signer_account_pk);
@@ -131,16 +128,47 @@ function storage_has_key(_key) {
     return res;
 }
 
+
+
 const data = "I am data";
 storage_write("key", data);
 assert.equal(storage_read("key", 1000), data)
 // assert.deepEqual(utils.UTF8toStr(memory.slice(1000, 1000 + toNum(vm.register_len(BigInt(0))))), data);
-assert(storage_has_key("key") == true);
+assert(storage_has_key("key"));
 
 var errored = false
 vm.read_register(BigInt(10), BigInt(0));
-vm.storage_iter_next(BigInt(0), BigInt(0), BigInt(0));
+storage_write("key1", data);
 
+let key = utils.StrtoUTF8("key");
+// const saved = memory.slice(1000, 1000 + key.length);
+memory.set(key, 2000);
+
+let iterid = vm.storage_iter_prefix(BigInt(key.length), BigInt(2000));
+console.log(iterid);
+vm.storage_iter_next(iterid, BigInt(2), BigInt(3));
+console.log(utils.UTF8toStr(readReg(2)),utils.UTF8toStr(readReg(3)));
+vm.storage_iter_next(iterid, BigInt(2), BigInt(3));
+console.log(utils.UTF8toStr(readReg(2)),utils.UTF8toStr(readReg(3)));
+
+// storage_write("aa", "bar1");
+// storage_write("aaa", "bar2");
+// storage_write("ab", "bar2");
+// storage_write("abb", "bar3");
+
+// key = utils.StrtoUTF8("key");
+// // const saved = memory.slice(1000, 1000 + key.length);
+// memory.set(key, 2000);
+
+key2 = utils.StrtoUTF8("key9");
+// const saved = memory.slice(1000, 1000 + key.length);
+memory.set(key2, 3000);
+
+iterid = vm.storage_iter_range(BigInt(key.length), BigInt(2000), BigInt(key2.length), BigInt(3000));
+console.log(iterid);
+while (vm.storage_iter_next(iterid, BigInt(2), BigInt(3)) > 0) {
+    console.log(utils.UTF8toStr(readReg(2)),utils.UTF8toStr(readReg(3)));
+}
 // vm.read_register(BigInt(0), BigInt(0));
 // assert(memory[0] == 84);
 
