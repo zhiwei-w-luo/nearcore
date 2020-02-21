@@ -33,15 +33,15 @@ block_production_time = 1
 client_config_changes = {
     "consensus": {
         "min_block_production_delay": {
-            "secs": block_production_time,
+            "secs": 2,
             "nanos": 0,
         },
         "max_block_production_delay": {
-            "secs": 2 * block_production_time,
+            "secs": 6,
             "nanos": 0,
         },
         "max_block_wait_delay": {
-            "secs": 6 * block_production_time,            
+            "secs": 12,
             "nanos": 0,
         },
     }
@@ -60,6 +60,8 @@ genesis_config_changes = [
     12,
     12
   ]],
+  ["block_producer_kickout_threshold", 80],
+  ["epoch_length", 1000]
 ]
 
 num_machines = 100
@@ -152,7 +154,7 @@ for i in range(num_machines):
 mkdir -p /tmp/near/node{i}
 # deactivate virtualenv doesn't work in non interactive shell, explicitly run with python2
 cd ..
-/usr/bin/python2 scripts/start_stakewars.py --local --home /tmp/near/node{i} --init --signer-keys --account-id=node{i}
+python2 scripts/start_stakewars.py --local --home /tmp/near/node{i} --init --signer-keys --account-id=node{i}
 ''')
     assert p.returncode == 0
 
