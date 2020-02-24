@@ -164,6 +164,7 @@ impl EpochManager {
         epoch_id: &EpochId,
         last_block_hash: &CryptoHash,
     ) -> Result<EpochSummary, EpochError> {
+        info!("13.12");
         let epoch_info = self.get_epoch_info(epoch_id)?.clone();
         let mut proposals = BTreeMap::new();
         let mut validator_kickout = HashSet::new();
@@ -178,6 +179,7 @@ impl EpochManager {
         for (account_id, _) in slashed_validators.iter() {
             validator_kickout.insert(account_id.clone());
         }
+        info!("13.13");
 
         let mut hash = *last_block_hash;
         loop {
@@ -216,6 +218,7 @@ impl EpochManager {
 
             hash = info.prev_hash;
         }
+        info!("13.14");
 
         let all_proposals: Vec<_> = proposals.into_iter().map(|(_, v)| v).collect();
 
@@ -224,6 +227,7 @@ impl EpochManager {
         let prev_epoch_last_block_hash =
             self.get_block_info(&last_block_info.epoch_first_block)?.prev_hash;
         let prev_epoch_last_height = self.get_block_info(&prev_epoch_last_block_hash)?.height;
+        info!("13.15");
         let num_expected_chunks = self.get_num_expected_chunks(
             &epoch_info,
             num_shards,
@@ -233,6 +237,7 @@ impl EpochManager {
         )?;
         let next_epoch_id = self.get_next_epoch_id(&last_block_hash)?;
         let prev_validator_kickout = self.get_epoch_info(&next_epoch_id)?.validator_kickout.clone();
+        info!("13.16");
 
         // Compute kick outs for validators who are offline.
         let (kickout, validator_block_chunk_stats) = self.compute_kickout_info(
@@ -332,9 +337,11 @@ impl EpochManager {
         mut block_info: BlockInfo,
         rng_seed: RngSeed,
     ) -> Result<StoreUpdate, EpochError> {
+        info!("13.0");
         let mut store_update = self.store.store_update();
         // Check that we didn't record this block yet.
         if !self.has_block_info(current_hash)? {
+            info!("13.1");
             if block_info.prev_hash == CryptoHash::default() {
                 // This is genesis block, we special case as new epoch.
                 assert_eq!(block_info.proposals.len(), 0);
@@ -347,21 +354,26 @@ impl EpochManager {
                     genesis_epoch_info,
                 )?;
             } else {
+                info!("13.2");
                 let prev_block_info = self.get_block_info(&block_info.prev_hash)?.clone();
                 let epoch_info = self.get_epoch_info(&prev_block_info.epoch_id)?.clone();
+                info!("13.3");
 
                 let mut is_epoch_start = false;
                 if prev_block_info.prev_hash == CryptoHash::default() {
+                    info!("13.4");
                     // This is first real block, starts the new epoch.
                     block_info.epoch_id = EpochId::default();
                     block_info.epoch_first_block = *current_hash;
                     is_epoch_start = true;
                 } else if self.is_next_block_in_next_epoch(&prev_block_info)? {
+                    info!("13.5");
                     // Current block is in the new epoch, finalize the one in prev_block.
                     block_info.epoch_id = self.get_next_epoch_id_from_info(&prev_block_info)?;
                     block_info.epoch_first_block = *current_hash;
                     is_epoch_start = true;
                 } else {
+                    info!("13.6");
                     // Same epoch as parent, copy epoch_id and epoch_start_height.
                     block_info.epoch_id = prev_block_info.epoch_id;
                     block_info.epoch_first_block = prev_block_info.epoch_first_block;
@@ -370,6 +382,7 @@ impl EpochManager {
                 // Keep `slashed` from previous block if they are still in the epoch info stake change
                 // (e.g. we need to keep track that they are still slashed, because when we compute
                 // returned stake we are skipping account ids that are slashed in `stake_change`).
+                info!("13.7");
                 for (account_id, slash_state) in prev_block_info.slashed.iter() {
                     if is_epoch_start {
                         if slash_state == &SlashState::DoubleSign
@@ -397,6 +410,7 @@ impl EpochManager {
                             .or_insert(slash_state.clone());
                     }
                 }
+                info!("13.8");
 
                 let BlockInfo { block_tracker, mut all_proposals, .. } = prev_block_info;
 
@@ -406,6 +420,7 @@ impl EpochManager {
                     prev_block_info.height,
                     if is_epoch_start { HashMap::default() } else { block_tracker },
                 );
+                info!("13.9");
                 if is_epoch_start {
                     block_info.all_proposals = block_info.proposals.clone();
                     self.save_epoch_start(
@@ -417,11 +432,14 @@ impl EpochManager {
                     all_proposals.extend(block_info.proposals.clone());
                     block_info.all_proposals = all_proposals;
                 }
+                info!("13.10");
 
                 // Save current block info.
                 self.save_block_info(&mut store_update, current_hash, block_info.clone())?;
+                info!("saving block info for {}", current_hash);
                 // If this is the last block in the epoch, finalize this epoch.
                 if self.is_next_block_in_next_epoch(&block_info)? {
+                    info!("13.11");
                     self.finalize_epoch(&mut store_update, &block_info, &current_hash, rng_seed)?;
                 }
             }

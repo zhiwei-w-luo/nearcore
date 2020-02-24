@@ -32,16 +32,12 @@ block_production_time = 1
 
 client_config_changes = {
     "consensus": {
-        "min_block_production_delay": {
+        "max_block_production_delay": {
             "secs": 2,
             "nanos": 0,
         },
-        "max_block_production_delay": {
-            "secs": 6,
-            "nanos": 0,
-        },
         "max_block_wait_delay": {
-            "secs": 12,
+            "secs": 4,
             "nanos": 0,
         },
     }
@@ -49,22 +45,22 @@ client_config_changes = {
 
 # default is 50; 7,7,6,6,6,6,6,6
 genesis_config_changes = [
-  ["num_block_producer_seats", 100],
+  ["num_block_producer_seats", 40],
   ["num_block_producer_seats_per_shard", [
-    13,
-    13,
-    13,
-    13,
-    12,
-    12,
-    12,
-    12
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5,
+    5
   ]],
   ["block_producer_kickout_threshold", 80],
   ["epoch_length", 1000]
 ]
 
-num_machines = 100
+num_machines = 40
 
 # 25 zones, each zone 4 instances
 # 5 asia, 1 australia, 5 europe, 1 canada, 13 us

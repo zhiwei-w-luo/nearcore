@@ -2502,7 +2502,7 @@ impl<'a> ChainUpdate<'a> {
     where
         F: FnMut(ChallengeBody) -> (),
     {
-        debug!(target: "chain", "Process block {} at {}, approvals: {}, me: {:?}", block.hash(), block.header.inner_lite.height, block.header.num_approvals(), me);
+        info!(target: "chain", "Process block {} at {}, approvals: {}, me: {:?}", block.hash(), block.header.inner_lite.height, block.header.num_approvals(), me);
 
         // Check if we have already processed this block previously.
         self.check_known(&block)?;
@@ -2517,6 +2517,8 @@ impl<'a> ChainUpdate<'a> {
         {
             return Err(ErrorKind::EpochOutOfBounds.into());
         }
+
+        info!("1");
 
         // First real I/O expense.
         let prev = self.get_previous_header(&block.header)?;
@@ -2534,6 +2536,8 @@ impl<'a> ChainUpdate<'a> {
             return Err(ErrorKind::InvalidBlockHeight.into());
         }
 
+        info!("2");
+
         let (is_caught_up, needs_to_start_fetching_state) =
             if self.runtime_adapter.is_next_block_epoch_start(&prev_hash)? {
                 if !self.prev_block_is_caught_up(&prev_prev_hash, &prev_hash)? {
@@ -2550,14 +2554,20 @@ impl<'a> ChainUpdate<'a> {
                 (self.prev_block_is_caught_up(&prev_prev_hash, &prev_hash)?, false)
             };
 
+        info!("3");
+
         debug!(target: "chain", "{:?} Process block {}, is_caught_up: {}, need_to_start_fetching_state: {}", me, block.hash(), is_caught_up, needs_to_start_fetching_state);
 
         // Check the header is valid before we proceed with the full block.
         self.process_header_for_block(&block.header, provenance, on_challenge)?;
 
+        info!("4");
+
         for approval in block.header.inner_rest.approvals.iter() {
             FinalityGadget::process_approval(me, approval, &mut self.chain_store_update)?;
         }
+
+        info!("5");
 
         // We need to know the last approval on the previous block to later compute the reference
         //    block for the current block. If it is not known by now, transfer it from the block
@@ -2570,6 +2580,8 @@ impl<'a> ChainUpdate<'a> {
                     .save_my_last_approval_with_reference_hash(&prev_hash, prev_approval);
             }
         }
+
+        info!("6");
 
         if !block.check_validity() {
             byzantine_assert!(false);
@@ -2585,10 +2597,14 @@ impl<'a> ChainUpdate<'a> {
             return Err(ErrorKind::InvalidGasPrice.into());
         }
 
+        info!("7");
+
         let prev_block = self.chain_store_update.get_block(&prev_hash)?.clone();
 
         self.ping_missing_chunks(me, prev_hash, &block)?;
+        info!("8");
         self.save_incoming_receipts_from_block(me, &block)?;
+        info!("9");
 
         // Do basic validation of chunks before applying the transactions
         for (chunk_header, prev_chunk_header) in block.chunks.iter().zip(prev_block.chunks.iter()) {
@@ -2602,9 +2618,11 @@ impl<'a> ChainUpdate<'a> {
                 }
             }
         }
+        info!("10");
 
         // Always apply state transition for shards in the current epoch
         self.apply_chunks(me, block, &prev_block, ApplyChunksMode::ThisEpoch)?;
+        info!("11");
 
         // If we have the state for the next epoch already downloaded, apply the state transition for the next epoch as well,
         //    otherwise put the block into the permanent storage to have the state transition applied later
@@ -2613,6 +2631,8 @@ impl<'a> ChainUpdate<'a> {
         } else {
             self.chain_store_update.add_block_to_catchup(prev_hash, block.hash());
         }
+
+        info!("12");
 
         // Verify that proposals from chunks match block header proposals.
         let mut all_chunk_proposals = vec![];
@@ -2624,6 +2644,8 @@ impl<'a> ChainUpdate<'a> {
         if all_chunk_proposals != block.header.inner_rest.validator_proposals {
             return Err(ErrorKind::InvalidValidatorProposals.into());
         }
+
+        info!("13");
 
         // If block checks out, record validator proposals for given block.
         let last_quorum_pre_commit = &block.header.inner_rest.last_quorum_pre_commit;
@@ -2644,6 +2666,7 @@ impl<'a> ChainUpdate<'a> {
             block.header.inner_rest.validator_reward,
             block.header.inner_rest.total_supply,
         )?;
+        info!("14");
 
         // Add validated block to the db, even if it's not the canonical fork.
         self.chain_store_update.save_block(block.clone());
@@ -2653,6 +2676,7 @@ impl<'a> ChainUpdate<'a> {
                     .save_block_hash_with_new_chunk(block.hash(), shard_id as ShardId);
             }
         }
+        info!("15");
 
         // Update the chain head if it's the new tip
         let res = self.update_head(block)?;
