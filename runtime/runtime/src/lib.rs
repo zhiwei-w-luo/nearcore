@@ -62,6 +62,8 @@ pub struct ApplyState {
     /// Currently building block height.
     // TODO #1903 pub block_height: BlockHeight,
     pub block_index: BlockHeight,
+    /// A hash of the recent block the new block is creating on
+    pub prev_block_hash: CryptoHash,
     /// Current epoch length.
     pub epoch_length: BlockHeightDelta,
     /// Price for the gas.

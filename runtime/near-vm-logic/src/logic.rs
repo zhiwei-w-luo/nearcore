@@ -605,6 +605,24 @@ impl<'a> VMLogic<'a> {
         Ok(self.context.block_timestamp)
     }
 
+    // /// Writes the current block_hash into a `register_id` register 
+    // ///
+    // /// # Errors
+    // ///
+    // /// If `value_len + value_ptr` points outside the memory or the registers use more memory than
+    // /// the limit with `MemoryAccessViolation`.
+    // ///
+    // /// # Cost
+    // ///
+    // /// `base + write_register_base + write_register_byte * num_bytes + sha256_base + sha256_byte * num_bytes`
+    // pub fn block_hash(register_id: u64) -> Result<()> {
+    //     self.gas_counter.pay_base(sha256_base)?;
+    //     let value = self.get_vec_from_memory_or_register(value_ptr, value_len)?;
+    //     self.gas_counter.pay_per_byte(sha256_byte, value.len() as u64)?;
+    //     let value_hash = self.ext.sha256(&value)?;
+    //     self.internal_write_register(register_id, value_hash)
+    // }
+
     /// Returns the number of bytes used by the contract if it was saved to the trie as of the
     /// invocation. This includes:
     /// * The data written with storage_* functions during current and previous execution;

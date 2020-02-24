@@ -285,6 +285,7 @@ impl NightshadeRuntime {
 
         let apply_state = ApplyState {
             block_index: block_height,
+            prev_block_hash: prev_block_hash.clone(),
             epoch_length: self.genesis_config.epoch_length,
             gas_price,
             block_timestamp,
@@ -402,6 +403,7 @@ impl RuntimeAdapter for NightshadeRuntime {
     fn validate_tx(
         &self,
         block_height: BlockHeight,
+        prev_block_hash: CryptoHash,
         block_timestamp: u64,
         gas_price: Balance,
         state_root: StateRoot,
@@ -410,6 +412,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         let mut state_update = TrieUpdate::new(self.trie.clone(), state_root);
         let apply_state = ApplyState {
             block_index: block_height,
+            prev_block_hash,
             epoch_length: self.genesis_config.epoch_length,
             gas_price,
             block_timestamp,
@@ -436,6 +439,7 @@ impl RuntimeAdapter for NightshadeRuntime {
     fn prepare_transactions(
         &self,
         block_height: BlockHeight,
+        prev_block_hash: CryptoHash,
         block_timestamp: u64,
         gas_price: Balance,
         gas_limit: Gas,
@@ -447,6 +451,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         let mut state_update = TrieUpdate::new(self.trie.clone(), state_root);
         let apply_state = ApplyState {
             block_index: block_height,
+            prev_block_hash,
             epoch_length: self.genesis_config.epoch_length,
             gas_price,
             block_timestamp,

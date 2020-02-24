@@ -483,6 +483,7 @@ impl Client {
 
         let transactions = self.prepare_transactions(
             next_height,
+            prev_block_hash,
             prev_block_timestamp,
             shard_id,
             &chunk_extra,
@@ -558,6 +559,7 @@ impl Client {
     fn prepare_transactions(
         &mut self,
         next_height: BlockHeight,
+        prev_block_hash: CryptoHash,
         prev_block_timestamp: u64,
         shard_id: ShardId,
         chunk_extra: &ChunkExtra,
@@ -569,6 +571,7 @@ impl Client {
             runtime_adapter
                 .prepare_transactions(
                     next_height,
+                    prev_block_hash,
                     prev_block_timestamp,
                     prev_block_header.inner_rest.gas_price,
                     chunk_extra.gas_limit,
@@ -1124,6 +1127,7 @@ impl Client {
                 .runtime_adapter
                 .validate_tx(
                     head.height + 1,
+                    cur_block_header.hash,
                     cur_block_header.inner_lite.timestamp,
                     gas_price,
                     state_root,

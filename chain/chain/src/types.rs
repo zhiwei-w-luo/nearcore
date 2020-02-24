@@ -127,6 +127,7 @@ pub trait RuntimeAdapter: Send + Sync {
     fn validate_tx(
         &self,
         block_height: BlockHeight,
+        block_hash: CryptoHash,
         block_timestamp: u64,
         gas_price: Balance,
         state_root: StateRoot,
@@ -143,6 +144,7 @@ pub trait RuntimeAdapter: Send + Sync {
     fn prepare_transactions(
         &self,
         block_height: BlockHeight,
+        prev_block_hash: CryptoHash,
         block_timestamp: u64,
         gas_price: Balance,
         gas_limit: Gas,

@@ -55,6 +55,7 @@ wrapped_imports! {
     // TODO #1903 rename to `block_height`
     block_index<[] -> [u64]>,
     block_timestamp<[] -> [u64]>,
+    prev_block_hash<[] -> [u64]>,
     storage_usage<[] -> [u64]>,
     // #################
     // # Economics API #

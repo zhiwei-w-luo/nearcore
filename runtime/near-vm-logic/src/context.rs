@@ -1,4 +1,4 @@
-use crate::types::{AccountId, Balance, BlockHeight, Gas, PublicKey, StorageUsage};
+use crate::types::{AccountId, Balance, BlockHeight, Gas, PublicKey, StorageUsage, CryptoHash};
 use serde::{Deserialize, Serialize};
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -26,6 +26,9 @@ pub struct VMContext {
     pub block_index: BlockHeight,
     /// The current block timestamp (number of non-leap-nanoseconds since January 1, 1970 0:00:00 UTC).
     pub block_timestamp: u64,
+
+    /// The previos block hash
+    pub prev_block_hash: CryptoHash,
 
     /// The balance attached to the given account. Excludes the `attached_deposit` that was
     /// attached to the transaction.
