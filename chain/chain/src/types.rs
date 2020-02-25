@@ -385,6 +385,7 @@ pub trait RuntimeAdapter: Send + Sync {
         &self,
         state_root: &StateRoot,
         block_height: BlockHeight,
+        block_prev_hash: &CryptoHash,
         block_timestamp: u64,
         block_hash: &CryptoHash,
         request: &QueryRequest,

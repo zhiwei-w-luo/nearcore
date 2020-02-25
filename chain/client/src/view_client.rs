@@ -162,6 +162,7 @@ impl ViewClientActor {
                     .query(
                         &state_root,
                         header.inner_lite.height,
+                        &header.prev_hash,
                         header.inner_lite.timestamp,
                         &header.hash,
                         &msg.request,

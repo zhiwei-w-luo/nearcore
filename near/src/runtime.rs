@@ -907,6 +907,7 @@ impl RuntimeAdapter for NightshadeRuntime {
         &self,
         state_root: &StateRoot,
         block_height: BlockHeight,
+        block_prev_hash: &CryptoHash,
         block_timestamp: u64,
         block_hash: &CryptoHash,
         request: &QueryRequest,
@@ -927,6 +928,7 @@ impl RuntimeAdapter for NightshadeRuntime {
                 match self.call_function(
                     *state_root,
                     block_height,
+                    block_prev_hash,
                     block_timestamp,
                     account_id,
                     method_name,

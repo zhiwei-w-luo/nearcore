@@ -1,6 +1,7 @@
 use near_crypto::PublicKey;
 use near_primitives::account::{AccessKey, Account};
 use near_primitives::types::{AccountId, BlockHeight, MerkleHash};
+use near_primitives::hash::CryptoHash;
 use near_primitives::views::ViewStateResult;
 
 /// Adapter for querying runtime.
@@ -15,6 +16,7 @@ pub trait ViewRuntimeAdapter {
         &self,
         state_root: MerkleHash,
         height: BlockHeight,
+        block_prev_hash: &CryptoHash,
         block_timestamp: u64,
         contract_id: &AccountId,
         method_name: &str,
