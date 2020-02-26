@@ -32,12 +32,16 @@ block_production_time = 1
 
 client_config_changes = {
     "consensus": {
-        "max_block_production_delay": {
+        "min_block_production_delay": {
             "secs": 2,
             "nanos": 0,
         },
-        "max_block_wait_delay": {
+        "max_block_production_delay": {
             "secs": 4,
+            "nanos": 0,
+        },
+        "max_block_wait_delay": {
+            "secs": 8,
             "nanos": 0,
         },
     }
