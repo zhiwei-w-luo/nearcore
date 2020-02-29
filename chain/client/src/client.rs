@@ -427,7 +427,10 @@ impl Client {
             seen: to_timestamp(Utc::now()),
         })?;
 
-        info!("%%% block produced {}", block.header.hash);
+        info!(
+            "%%% block produced {} at height {}",
+            block.header.hash, block.header.inner_lite.height
+        );
         Ok(Some(block))
     }
 
@@ -776,6 +779,7 @@ impl Client {
                 return;
             }
         };
+        info!("%%% block {} at height {} is accepted", block_hash, block.header.inner_lite.height);
 
         let _ = self.check_and_update_doomslug_tip();
 
