@@ -49,7 +49,6 @@ git clone --single-branch --branch {branch} https://github.com/nearprotocol/near
 cd nearcore
 cargo build -p near --release {additional_flags}
 ''')
-
 assert p.returncode == 0
 
 print('near built')

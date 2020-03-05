@@ -1,3 +1,4 @@
+use log::info;
 use std::collections::btree_map::Entry;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::iter;
@@ -89,6 +90,7 @@ pub fn proposals_to_epoch_info(
     let num_total_seats = epoch_config.num_block_producer_seats + num_hidden_validator_seats;
     let stakes = ordered_proposals.iter().map(|(_, p)| p.stake).collect::<Vec<_>>();
     let threshold = find_threshold(&stakes, num_total_seats)?;
+    info!("total seats: {} threshold: {}", num_total_seats, threshold);
     // Remove proposals under threshold.
     let mut final_proposals = vec![];
 

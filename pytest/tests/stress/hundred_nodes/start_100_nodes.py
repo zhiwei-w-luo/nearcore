@@ -34,7 +34,7 @@ client_config_changes = {
     "consensus": {
         "min_block_production_delay": {
             "secs": 0,
-            "nanos": 300000000,
+            "nanos": 500000000,
         },
         "max_block_production_delay": {
             "secs": 2,

@@ -279,6 +279,7 @@ impl EpochManager {
             total_validator_reward,
             block_info.total_supply,
         );
+        info!("all proposals: {:?} kickout: {:?}", all_proposals, validator_kickout);
         let next_next_epoch_info = match proposals_to_epoch_info(
             &self.config,
             rng_seed,
@@ -295,6 +296,7 @@ impl EpochManager {
             }
             Err(err) => return Err(err),
         };
+        info!("next next epoch info: {:?}", next_next_epoch_info);
         // This epoch info is computed for the epoch after next (T+2),
         // where epoch_id of it is the hash of last block in this epoch (T).
         self.save_epoch_info(store_update, &EpochId(*last_block_hash), next_next_epoch_info)?;

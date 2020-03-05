@@ -1,10 +1,10 @@
 import json
 
-date = '20200304'
+date = '20200305'
 
 num_nodes = 100
 num_epoch = 0
-with open(f'/tmp/near/collected_logs_{date}/pytest-node-bowenwang-0.txt') as f:
+with open(f'/tmp/near/collected_logs_{date}/pytest-node-bowenwang-1.txt') as f:
     for l in f:
         if 'Shard Tracker' in l:
             print(f'epoch: {num_epoch}')
