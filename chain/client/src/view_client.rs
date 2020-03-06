@@ -16,7 +16,7 @@ use near_chain::{
 };
 use near_chain_configs::ClientConfig;
 #[cfg(feature = "adversarial")]
-use near_network::types::NetworkAdversarialMessage::{AdvDisableHeaderSync, AdvSetSyncInfo};
+use near_network::types::NetworkAdversarialMessage;
 use near_network::types::{
     NetworkViewClientMessages, NetworkViewClientResponses, ReasonForBan, StateResponseInfo,
 };
@@ -45,6 +45,8 @@ pub struct ViewClientActor {
     #[cfg(feature = "adversarial")]
     pub adv_disable_header_sync: bool,
     #[cfg(feature = "adversarial")]
+    pub adv_disable_doomslug: bool,
+    #[cfg(feature = "adversarial")]
     pub adv_sync_info: Option<(u64, u64)>,
 
     chain: Chain,
@@ -70,17 +72,29 @@ impl ViewClientActor {
         runtime_adapter: Arc<dyn RuntimeAdapter>,
         network_adapter: Arc<dyn NetworkAdapter>,
         config: ClientConfig,
+        expected_genesis_hash: Option<String>,
     ) -> Result<Self, Error> {
         // TODO: should we create shared ChainStore that is passed to both Client and ViewClient?
-        let chain = Chain::new(
+        let mut chain = Chain::new(
             store,
             runtime_adapter.clone(),
             chain_genesis,
             DoomslugThresholdMode::HalfStake,
         )?;
+        if let Some(expected_genesis_hash) = expected_genesis_hash {
+            let genesis_hash = chain.get_block_by_height(0).unwrap().hash().to_string();
+            if genesis_hash != expected_genesis_hash {
+                panic!(
+                    "Expected genesis hash to be {}, actual {}",
+                    expected_genesis_hash, genesis_hash,
+                );
+            }
+        }
         Ok(ViewClientActor {
             #[cfg(feature = "adversarial")]
             adv_disable_header_sync: false,
+            #[cfg(feature = "adversarial")]
+            adv_disable_doomslug: false,
             #[cfg(feature = "adversarial")]
             adv_sync_info: None,
             chain,
@@ -498,12 +512,18 @@ impl Handler<NetworkViewClientMessages> for ViewClientActor {
             #[cfg(feature = "adversarial")]
             NetworkViewClientMessages::Adversarial(adversarial_msg) => {
                 return match adversarial_msg {
-                    AdvSetSyncInfo(height, score) => {
+                    NetworkAdversarialMessage::AdvDisableDoomslug => {
+                        info!(target: "adversary", "Turning Doomslug off");
+                        self.adv_disable_doomslug = true;
+                        self.chain.adv_disable_doomslug();
+                        NetworkViewClientResponses::NoResponse
+                    }
+                    NetworkAdversarialMessage::AdvSetSyncInfo(height, score) => {
                         info!(target: "adversary", "Setting adversarial stats: ({}, {})", height, score);
                         self.adv_sync_info = Some((height, score));
                         NetworkViewClientResponses::NoResponse
                     }
-                    AdvDisableHeaderSync => {
+                    NetworkAdversarialMessage::AdvDisableHeaderSync => {
                         info!(target: "adversary", "Blocking header sync");
                         self.adv_disable_header_sync = true;
                         NetworkViewClientResponses::NoResponse

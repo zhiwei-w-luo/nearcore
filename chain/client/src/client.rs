@@ -757,6 +757,10 @@ impl Client {
         if Some(&next_block_producer) == self.validator_signer.as_ref().map(|x| x.validator_id()) {
             self.collect_block_approval(&approval, false);
         } else {
+            info!(
+                "sending approval message to {} for height {} parent hash {}",
+                next_block_producer, approval.target_height, approval.parent_hash
+            );
             let approval_message = ApprovalMessage::new(approval, next_block_producer);
             self.network_adapter.do_send(NetworkRequests::Approval { approval_message });
         }

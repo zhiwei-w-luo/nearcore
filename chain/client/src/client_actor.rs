@@ -18,9 +18,7 @@ use near_chain::{
 use near_chain_configs::ClientConfig;
 use near_crypto::Signature;
 #[cfg(feature = "adversarial")]
-use near_network::types::NetworkAdversarialMessage::{
-    AdvDisableHeaderSync, AdvGetSavedBlocks, AdvProduceBlocks,
-};
+use near_network::types::NetworkAdversarialMessage;
 use near_network::types::{NetworkInfo, ReasonForBan, StateResponseInfo};
 use near_network::{
     NetworkAdapter, NetworkClientMessages, NetworkClientResponses, NetworkRequests,
@@ -39,7 +37,7 @@ use near_telemetry::TelemetryActor;
 
 use crate::client::Client;
 use crate::info::InfoHelper;
-use crate::sync::{highest_height_peer, StateSyncResult};
+use crate::sync::{highest_height_peer, StateSync, StateSyncResult};
 use crate::types::{
     Error, GetNetworkInfo, NetworkInfoResponse, ShardSyncDownload, ShardSyncStatus, Status,
     StatusSyncInfo, SyncStatus,
@@ -55,6 +53,8 @@ pub struct ClientActor {
     pub adv_sync_info: Option<(u64, u64)>,
     #[cfg(feature = "adversarial")]
     pub adv_disable_header_sync: bool,
+    #[cfg(feature = "adversarial")]
+    pub adv_disable_doomslug: bool,
 
     client: Client,
     network_adapter: Arc<dyn NetworkAdapter>,
@@ -114,6 +114,8 @@ impl ClientActor {
             adv_sync_info: None,
             #[cfg(feature = "adversarial")]
             adv_disable_header_sync: false,
+            #[cfg(feature = "adversarial")]
+            adv_disable_doomslug: false,
             client,
             network_adapter,
             node_id,
@@ -164,12 +166,19 @@ impl Handler<NetworkClientMessages> for ClientActor {
             #[cfg(feature = "adversarial")]
             NetworkClientMessages::Adversarial(adversarial_msg) => {
                 return match adversarial_msg {
-                    AdvDisableHeaderSync => {
+                    NetworkAdversarialMessage::AdvDisableDoomslug => {
+                        info!(target: "adversary", "Turning Doomslug off");
+                        self.adv_disable_doomslug = true;
+                        self.client.doomslug.adv_disable();
+                        self.client.chain.adv_disable_doomslug();
+                        NetworkClientResponses::NoResponse
+                    }
+                    NetworkAdversarialMessage::AdvDisableHeaderSync => {
                         info!(target: "adversary", "Blocking header sync");
                         self.adv_disable_header_sync = true;
                         NetworkClientResponses::NoResponse
                     }
-                    AdvProduceBlocks(num_blocks, only_valid) => {
+                    NetworkAdversarialMessage::AdvProduceBlocks(num_blocks, only_valid) => {
                         info!(target: "adversary", "Producing {} blocks", num_blocks);
                         self.client.adv_produce_blocks = true;
                         self.client.adv_produce_blocks_only_valid = only_valid;
@@ -204,7 +213,7 @@ impl Handler<NetworkClientMessages> for ClientActor {
                         }
                         NetworkClientResponses::NoResponse
                     }
-                    AdvGetSavedBlocks => {
+                    NetworkAdversarialMessage::AdvGetSavedBlocks => {
                         info!(target: "adversary", "Requested number of saved blocks");
                         let store = self.client.chain.store().store();
                         let mut num_blocks = 0;
@@ -214,7 +223,7 @@ impl Handler<NetworkClientMessages> for ClientActor {
                         NetworkClientResponses::AdvU64(num_blocks)
                     }
                     _ => panic!("invalid adversary message"),
-                }
+                };
             }
             NetworkClientMessages::Transaction(tx) => self.client.process_tx(tx),
             NetworkClientMessages::Block(block, peer_id, was_requested) => {
@@ -265,6 +274,7 @@ impl Handler<NetworkClientMessages> for ClientActor {
                 }
             }
             NetworkClientMessages::BlockApproval(approval, _) => {
+                info!("received approval for height {}: {:?}", approval.target_height, approval);
                 self.client.collect_block_approval(&approval, false);
                 NetworkClientResponses::NoResponse
             }
@@ -579,6 +589,11 @@ impl ClientActor {
         let epoch_id =
             self.client.runtime_adapter.get_epoch_id_from_prev_block(&head.last_block_hash)?;
 
+        info!(
+            "last known height {} threshold height: {}",
+            latest_known.height,
+            self.client.doomslug.get_largest_height_crossing_threshold()
+        );
         for height in
             latest_known.height + 1..=self.client.doomslug.get_largest_height_crossing_threshold()
         {
@@ -872,7 +887,9 @@ impl ClientActor {
         for _ in 0..self.client.config.state_fetch_horizon {
             sync_hash = self.client.chain.get_block_header(&sync_hash)?.prev_hash;
         }
-        Ok(sync_hash)
+        let epoch_start_sync_hash =
+            StateSync::get_epoch_start_sync_hash(&mut self.client.chain, &sync_hash)?;
+        Ok(epoch_start_sync_hash)
     }
 
     /// Runs catchup on repeat, if this client is a validator.
