@@ -34,7 +34,7 @@ client_config_changes = {
     "consensus": {
         "min_block_production_delay": {
             "secs": 0,
-            "nanos": 300000000,
+            "nanos": 200000000,
         },
         "max_block_production_delay": {
             "secs": 2,
@@ -123,6 +123,8 @@ zones = [
     'us-west2-b',
     'us-west2-c',
 ]
+# Unless you want to shutdown gcloud instance and restart, keep this `False'
+reserve_ip=False
 
 pbar = tqdm(total=num_machines, desc=' create machines')
 def create_machine(i):
@@ -132,8 +134,8 @@ def create_machine(i):
                       image_project='near-core',
                       image=image_name,
                       zone=zones[i % len(zones)],
-                      firewall_allows=['tcp:3030', 'tcp:24567'],
-                      min_cpu_platform='Intel Skylake')
+                      min_cpu_platform='Intel Skylake',
+                      reserve_ip=reserve_ip)
     pbar.update(1)
     return m
 
