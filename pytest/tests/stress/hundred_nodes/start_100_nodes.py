@@ -221,8 +221,10 @@ pbar.close()
 
 pbar = tqdm(total=num_machines, desc=' start near')
 def start_nearcore(m):
+    import random
+    is_archival = random.randint(0, 1) == 0
     m.run_detach_tmux(
-        'cd nearcore && target/release/near run --archive')
+        'cd nearcore && export RUST_BACKTRACE=1 && target/release/near run')
     pbar.update(1)
 
 pmap(start_nearcore, machines)

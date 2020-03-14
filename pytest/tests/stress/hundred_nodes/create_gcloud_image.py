@@ -40,7 +40,7 @@ for i in `seq 1 3`; do
     sudo apt update
 done
 
-sudo apt install -y python pkg-config libssl-dev build-essential cmake clang llvm
+sudo apt install -y python pkg-config libssl-dev build-essential cmake clang llvm valgrind
 
 curl -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain nightly-2019-10-04
 source ~/.cargo/env
