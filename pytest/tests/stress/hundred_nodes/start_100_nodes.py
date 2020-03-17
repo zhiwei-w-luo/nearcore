@@ -54,6 +54,7 @@ genesis_config_changes = [
     100
   ]],
   ["block_producer_kickout_threshold", 80],
+  ["chunk_producer_kickout_threshold", 100],
   ["epoch_length", 1000]
 ]
 
