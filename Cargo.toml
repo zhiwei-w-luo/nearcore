@@ -37,7 +37,8 @@ members = [
     "genesis-tools/genesis-csv-to-json",
     "genesis-tools/genesis-populate",
     "genesis-tools/keypair-generator",
-    "tools/restaked"
+    "tools/restaked",
+    "scripts/state/db-export"
 ]
 
 [dev-dependencies]
