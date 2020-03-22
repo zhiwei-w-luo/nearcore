@@ -592,11 +592,6 @@ impl ClientActor {
         let epoch_id =
             self.client.runtime_adapter.get_epoch_id_from_prev_block(&head.last_block_hash)?;
 
-        info!(
-            "last known height {} threshold height: {}",
-            latest_known.height,
-            self.client.doomslug.get_largest_height_crossing_threshold()
-        );
         for height in
             latest_known.height + 1..=self.client.doomslug.get_largest_height_crossing_threshold()
         {

@@ -55,10 +55,10 @@ genesis_config_changes = [
   ]],
   ["block_producer_kickout_threshold", 80],
   ["chunk_producer_kickout_threshold", 80],
-  ["epoch_length", 43200]
+  ["epoch_length", 1000]
 ]
 
-num_machines = 100
+num_machines = 20
 
 # 25 zones, each zone 4 instances
 # 5 asia, 1 australia, 5 europe, 1 canada, 13 us
@@ -221,12 +221,15 @@ pmap(upload_genesis_files, range(num_machines))
 pbar.close()
 
 pbar = tqdm(total=num_machines, desc=' start near')
-def start_nearcore(m):
-    import random
-    is_archival = random.randint(0, 1) == 0
-    m.run_detach_tmux(
-        'cd nearcore && export RUST_BACKTRACE=1 && target/release/near run')
+def start_nearcore(m, use_valgrind=True):
+    if use_valgrind:
+        m.run_detach_tmux(
+            'cd nearcore && export RUST_BACKTRACE=1 && valgrind --tool=massif target/release/near run')
+    else:
+        m.run_detach_tmux(
+            'cd nearcore && export RUST_BACKTRACE=1 && target/release/near run')
     pbar.update(1)
 
+# start_nearcore(machines[0], use_valgrind=True)
 pmap(start_nearcore, machines)
 pbar.close()

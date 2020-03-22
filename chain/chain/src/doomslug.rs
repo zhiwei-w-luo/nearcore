@@ -172,7 +172,6 @@ impl DoomslugApprovalsTracker {
         now: Instant,
         approval: &Approval,
     ) -> DoomslugBlockProductionReadiness {
-        info!("process approval for height {}, parent hash {}, total approved stake {} total endorsed stake {} total stake {}", approval.target_height, approval.parent_hash, self.approved_stake, self.endorsed_stake, self.total_stake);
         let mut increment_approved_stake = false;
         let mut increment_endorsed_stake = false;
         self.witness.entry(approval.account_id.clone()).or_insert_with(|| {
@@ -660,24 +659,10 @@ impl Doomslug {
         target_height: BlockHeight,
         has_enough_chunks: bool,
     ) -> bool {
-        info!(
-            "approval tracker at height {} exists: {}",
-            target_height,
-            self.approval_tracking.contains_key(&target_height)
-        );
         if let Some(approval_trackers_at_height) = self.approval_tracking.get_mut(&target_height) {
-            info!(
-                "approval tracker for {}: {:?}",
-                self.tip.block_hash,
-                approval_trackers_at_height.approval_trackers.get(&self.tip.block_hash)
-            );
             if let Some(approval_tracker) =
                 approval_trackers_at_height.approval_trackers.get_mut(&self.tip.block_hash)
             {
-                info!(
-                    "approval stake: {} total stake {}",
-                    approval_tracker.approved_stake, approval_tracker.total_stake
-                );
                 let block_production_readiness =
                     approval_tracker.get_block_production_readiness(now);
                 match block_production_readiness {
