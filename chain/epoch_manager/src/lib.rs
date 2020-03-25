@@ -929,7 +929,7 @@ impl EpochManager {
         Ok(EpochId(first_block_info.prev_hash))
     }
 
-    fn get_epoch_info(&mut self, epoch_id: &EpochId) -> Result<&EpochInfo, EpochError> {
+    pub fn get_epoch_info(&mut self, epoch_id: &EpochId) -> Result<&EpochInfo, EpochError> {
         if !self.epochs_info.cache_get(epoch_id).is_some() {
             let epoch_info = self
                 .store
@@ -1052,6 +1052,7 @@ mod tests {
         record_block(&mut epoch_manager, CryptoHash::default(), h[0], 0, vec![]);
 
         let expected0 = epoch_info(
+            1,
             vec![("test1", amount_staked)],
             vec![0, 0],
             vec![vec![0, 0]],
@@ -1077,6 +1078,7 @@ mod tests {
         record_block(&mut epoch_manager, h[2], h[3], 3, vec![]);
 
         let expected3 = epoch_info(
+            2,
             vec![("test1", amount_staked), ("test2", amount_staked)],
             vec![0, 1],
             vec![vec![0, 1]],
@@ -1120,6 +1122,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1237,6 +1240,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test1", amount_staked)],
                 vec![0],
                 vec![vec![0]],
@@ -1283,6 +1287,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                3,
                 vec![("test1", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1319,6 +1324,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1335,6 +1341,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                3,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1351,6 +1358,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                4,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1425,6 +1433,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1522,6 +1531,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", amount_staked)],
                 vec![0, 0],
                 vec![vec![0, 0]],
@@ -1760,6 +1770,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[2])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", stake_amount + test2_reward)],
                 vec![0],
                 vec![vec![0]],
@@ -1905,6 +1916,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[2])).unwrap(),
             &epoch_info(
+                2,
                 vec![
                     ("test1", stake_amount1 + test1_reward),
                     ("test2", stake_amount2 + test2_reward)
@@ -2049,6 +2061,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[2])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", stake_amount + test2_reward)],
                 vec![0, 0],
                 vec![vec![0], vec![0]],
@@ -2085,6 +2098,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&epoch_id).unwrap(),
             &epoch_info(
+                2,
                 vec![("test1", amount_staked), ("test2", amount_staked)],
                 vec![1, 0],
                 vec![vec![1, 0]],
@@ -2194,6 +2208,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[3])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", stake_amount), ("test3", stake_amount)],
                 vec![0, 1, 0],
                 vec![vec![0], vec![1], vec![0]],
@@ -2396,6 +2411,7 @@ mod tests {
         assert_eq!(
             em.get_epoch_info(&EpochId(h[2])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test2", stake_amount)],
                 vec![0, 0],
                 vec![vec![0], vec![0], vec![0], vec![0]],
@@ -2461,6 +2477,7 @@ mod tests {
             default_reward_calculator(),
         );
         let mut epoch_info = epoch_info(
+            1,
             vec![("test1", stake_amount), ("test2", stake_amount)],
             vec![0, 1, 0, 1],
             vec![vec![0, 1, 0, 1]],
@@ -2476,7 +2493,7 @@ mod tests {
             0,
         );
         epoch_info.validator_kickout = HashSet::default();
-        assert_eq!(em.get_epoch_info(&EpochId(CryptoHash::default())).unwrap(), &epoch_info)
+        assert_eq!(em.get_epoch_info(&EpochId::default()).unwrap(), &epoch_info)
     }
 
     #[test]
@@ -2507,6 +2524,7 @@ mod tests {
         assert_eq!(
             em.get_epoch_info(&EpochId(h[2])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test1", stake_amount)],
                 vec![0],
                 vec![vec![0]],
@@ -2558,6 +2576,7 @@ mod tests {
         assert_eq!(
             epoch_info1,
             &epoch_info(
+                1,
                 vec![("test1", stake_amount1), ("test3", stake_amount2)],
                 vec![0, 1],
                 vec![vec![0, 1]],
@@ -2590,6 +2609,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[BLOCK_CACHE_SIZE + 1])).unwrap(),
             &epoch_info(
+                2,
                 vec![("test1", stake_amount), ("test2", stake_amount)],
                 vec![1, 0],
                 vec![vec![1, 0]],
@@ -2627,6 +2647,7 @@ mod tests {
         assert_eq!(
             epoch_manager.get_epoch_info(&EpochId(h[4])).unwrap(),
             &epoch_info(
+                3,
                 vec![("test1", stake_amount), ("test2", stake_amount)],
                 vec![1, 0],
                 vec![vec![1, 0]],

@@ -58,7 +58,7 @@ genesis_config_changes = [
   ["epoch_length", 1000]
 ]
 
-num_machines = 20
+num_machines = 30
 
 # 25 zones, each zone 4 instances
 # 5 asia, 1 australia, 5 europe, 1 canada, 13 us
@@ -182,15 +182,17 @@ with open('/tmp/near/accounts.csv', 'w', newline='') as f:
 
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()
+    amount = 1000 * 10 ** 24
+    stake = 10 * 10 ** 24
 
     for i in range(num_machines):
         writer.writerow({
             'genesis_time': genesis_time,
             'account_id': f'node{i}',
             'full_pks': get_full_pks(i),
-            'amount': 10000000000000000000,
+            'amount': amount,
             'is_treasury': 'true' if i == 0 else 'false',
-            'validator_stake': 10000000000000000000,
+            'validator_stake': stake,
             'validator_key': get_validator_key(i),
             'peer_info': f'{get_pubkey(i)}@{machines[i].ip}:24567'
         })
@@ -230,6 +232,5 @@ def start_nearcore(m, use_valgrind=True):
             'cd nearcore && export RUST_BACKTRACE=1 && target/release/near run')
     pbar.update(1)
 
-# start_nearcore(machines[0], use_valgrind=True)
 pmap(start_nearcore, machines)
 pbar.close()
