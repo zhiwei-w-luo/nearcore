@@ -65,7 +65,7 @@ genesis_config_changes = [
 num_machines = 100
 
 # machine 0-(k-1) run docker, machine k-100 run binary
-num_docker_machines = 50
+num_docker_machines = 0
 
 # docker image to use
 docker_image = 'nearprotocol/nearcore:master'

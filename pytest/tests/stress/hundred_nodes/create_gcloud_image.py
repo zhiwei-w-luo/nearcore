@@ -7,7 +7,7 @@ import sys
 sys.path.append('lib')
 from utils import user_name
 
-additional_flags = ''
+additional_flags = '--features metric_recorder'
 
 toolchain = open(os.path.join(os.path.dirname(__file__), '../../../../rust-toolchain')).read().strip()
 
