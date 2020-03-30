@@ -172,10 +172,6 @@ fn receive_network_block() {
                 vec![],
                 vec![],
                 &signer,
-                0.into(),
-                CryptoHash::default(),
-                CryptoHash::default(),
-                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(block, PeerInfo::random().id, false));
@@ -236,10 +232,6 @@ fn receive_network_block_header() {
                 vec![],
                 vec![],
                 &signer,
-                0.into(),
-                CryptoHash::default(),
-                CryptoHash::default(),
-                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(
@@ -321,10 +313,6 @@ fn produce_block_with_approvals() {
                 vec![],
                 vec![],
                 &signer1,
-                0.into(),
-                CryptoHash::default(),
-                CryptoHash::default(),
-                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(
@@ -338,9 +326,8 @@ fn produce_block_with_approvals() {
                 let signer = InMemoryValidatorSigner::from_seed(&s, KeyType::ED25519, &s);
                 let approval = Approval::new(
                     block.hash(),
-                    Some(block.hash()),
+                    block.header.inner_lite.height,
                     10, // the height at which "test1" is producing
-                    false,
                     &signer,
                 );
                 client
@@ -474,10 +461,6 @@ fn invalid_blocks() {
                 vec![],
                 vec![],
                 &signer,
-                0.into(),
-                CryptoHash::default(),
-                CryptoHash::default(),
-                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             block.header.inner_rest.chunk_mask = vec![];
@@ -505,10 +488,6 @@ fn invalid_blocks() {
                 vec![],
                 vec![],
                 &signer,
-                0.into(),
-                CryptoHash::default(),
-                CryptoHash::default(),
-                CryptoHash::default(),
                 last_block.header.next_bp_hash,
             );
             client.do_send(NetworkClientMessages::Block(block2, PeerInfo::random().id, false));
@@ -576,7 +555,6 @@ fn client_sync_headers() {
                 chain_info: PeerChainInfo {
                     genesis_id: Default::default(),
                     height: 5,
-                    score: 4.into(),
                     tracked_shards: vec![],
                 },
                 edge_info: EdgeInfo::default(),
@@ -588,7 +566,6 @@ fn client_sync_headers() {
                 chain_info: PeerChainInfo {
                     genesis_id: Default::default(),
                     height: 5,
-                    score: 4.into(),
                     tracked_shards: vec![],
                 },
                 edge_info: EdgeInfo::default(),
@@ -731,16 +708,15 @@ fn test_invalid_approvals() {
     b1.header.inner_rest.approvals = (0..100)
         .map(|i| Approval {
             account_id: format!("test{}", i).to_string(),
-            reference_hash: Some(genesis.hash()),
             parent_hash: genesis.hash(),
+            parent_height: 0,
             target_height: 1,
-            is_endorsement: true,
             signature: InMemoryValidatorSigner::from_seed(
                 &format!("test{}", i),
                 KeyType::ED25519,
                 &format!("test{}", i),
             )
-            .sign_approval(&genesis.hash(), &Some(genesis.hash()), 1, true),
+            .sign_approval(&genesis.hash(), 0, 1),
         })
         .collect();
     let (hash, signature) = signer.sign_block_header_parts(
@@ -914,14 +890,16 @@ fn test_gc_long_epoch() {
     let mut blocks = vec![];
 
     for i in 1..=num_blocks {
-        let block_producer = env.clients[0]
-            .runtime_adapter
-            .get_block_producer(&EpochId(CryptoHash::default()), i)
-            .unwrap();
-        if block_producer == "test0".to_string() {
-            let block = env.clients[0].produce_block(i).unwrap().unwrap();
-            env.process_block(0, block.clone(), Provenance::PRODUCED);
-            blocks.push(block);
+        if i < epoch_length || i == num_blocks {
+            let block_producer = env.clients[0]
+                .runtime_adapter
+                .get_block_producer(&EpochId(CryptoHash::default()), i)
+                .unwrap();
+            if block_producer == "test0".to_string() {
+                let block = env.clients[0].produce_block(i).unwrap().unwrap();
+                env.process_block(0, block.clone(), Provenance::PRODUCED);
+                blocks.push(block);
+            }
         }
     }
     for block in blocks {

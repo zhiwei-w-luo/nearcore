@@ -37,7 +37,6 @@ fn make_peer_manager(
                 Box::new(Some(NetworkViewClientResponses::ChainInfo {
                     genesis_id: Default::default(),
                     height: 1,
-                    score: 0.into(),
                     tracked_shards: vec![],
                 }))
             }
