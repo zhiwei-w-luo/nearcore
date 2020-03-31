@@ -74,7 +74,7 @@ const BLOCK_HEADER_FETCH_HORIZON: BlockHeightDelta = 50;
 const CATCHUP_STEP_PERIOD: u64 = 100;
 
 /// Time between checking to re-request chunks.
-const CHUNK_REQUEST_RETRY_PERIOD: u64 = 200;
+const CHUNK_REQUEST_RETRY_PERIOD: u64 = 400;
 
 /// Expected epoch length.
 pub const EXPECTED_EPOCH_LENGTH: BlockHeightDelta = (5 * 60 * 1000) / MIN_BLOCK_PRODUCTION_DELAY;

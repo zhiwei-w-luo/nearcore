@@ -38,7 +38,7 @@ pub use crate::types::Error;
 mod chunk_cache;
 mod types;
 
-const CHUNK_REQUEST_RETRY_MS: u64 = 100;
+const CHUNK_REQUEST_RETRY_MS: u64 = 300;
 const CHUNK_REQUEST_SWITCH_TO_OTHERS_MS: u64 = 400;
 const CHUNK_REQUEST_SWITCH_TO_FULL_FETCH_MS: u64 = 3_000;
 const CHUNK_REQUEST_RETRY_MAX_MS: u64 = 100_000;
