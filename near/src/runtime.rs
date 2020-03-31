@@ -30,7 +30,6 @@ use near_primitives::types::{
     AccountId, Balance, BlockHeight, EpochHeight, EpochId, Gas, MerkleHash, NumShards, ShardId,
     StateChangeCause, StateRoot, StateRootNode, ValidatorStake, ValidatorStats,
 };
-use near_primitives::utils::{KeyForAccessKey, ACCOUNT_DATA_SEPARATOR};
 use near_primitives::views::{
     AccessKeyInfoView, CallResult, EpochValidatorInfo, QueryError, QueryRequest, QueryResponse,
     QueryResponseKind, ViewStateResult,
@@ -45,6 +44,7 @@ use node_runtime::{verify_and_charge_transaction, ApplyState, Runtime, Validator
 
 use crate::shard_tracker::{account_id_to_shard_id, ShardTracker};
 use near_chain::chain::NUM_EPOCHS_TO_KEEP_STORE_DATA;
+use near_primitives::utils::trie_key_parsers;
 
 const POISONED_LOCK_ERR: &str = "The lock was poisoned.";
 const STATE_DUMP_FILE: &str = "state_dump";
@@ -353,7 +353,6 @@ impl NightshadeRuntime {
             receipt_result,
             validator_proposals: apply_result.validator_proposals,
             total_gas_burnt,
-            total_rent_paid: apply_result.stats.total_rent_paid,
             total_validator_reward: apply_result.stats.total_validator_reward,
             total_balance_burnt: apply_result.stats.total_balance_burnt
                 + apply_result.stats.total_balance_slashed,
@@ -374,13 +373,9 @@ pub fn state_record_to_shard_id(state_record: &StateRecord, num_shards: NumShard
         }
         StateRecord::Data { key, .. } => {
             let key = from_base64(key).unwrap();
-            let separator = (1..key.len())
-                .find(|&x| key[x] == ACCOUNT_DATA_SEPARATOR[0])
+            let account_id = trie_key_parsers::parse_account_id_from_contract_data_key(&key)
                 .expect("Invalid data record");
-            account_id_to_shard_id(
-                &String::from_utf8(key[1..separator].to_vec()).expect("Must be account id"),
-                num_shards,
-            )
+            account_id_to_shard_id(&account_id, num_shards)
         }
         StateRecord::PostponedReceipt(receipt) => {
             account_id_to_shard_id(&receipt.receiver_id, num_shards)
@@ -406,6 +401,10 @@ impl RuntimeAdapter for NightshadeRuntime {
         } else {
             panic!("Found neither records in the config nor the state dump file. Either one should be present")
         }
+    }
+
+    fn get_trie(&self) -> Arc<Trie> {
+        self.trie.clone()
     }
 
     fn verify_block_signature(&self, header: &BlockHeader) -> Result<(), Error> {
@@ -854,7 +853,6 @@ impl RuntimeAdapter for NightshadeRuntime {
         proposals: Vec<ValidatorStake>,
         slashed_validators: Vec<SlashedValidator>,
         chunk_mask: Vec<bool>,
-        rent_paid: Balance,
         validator_reward: Balance,
         total_supply: Balance,
     ) -> Result<(), Error> {
@@ -870,7 +868,6 @@ impl RuntimeAdapter for NightshadeRuntime {
             proposals,
             chunk_mask,
             slashed_validators,
-            rent_paid,
             validator_reward,
             total_supply,
         );
@@ -1213,7 +1210,7 @@ impl node_runtime::adapter::ViewRuntimeAdapter for NightshadeRuntime {
         account_id: &AccountId,
     ) -> Result<Vec<(PublicKey, AccessKey)>, Box<dyn std::error::Error>> {
         let state_update = TrieUpdate::new(self.trie.clone(), state_root);
-        let prefix = KeyForAccessKey::get_prefix(account_id);
+        let prefix = trie_key_parsers::get_raw_prefix_for_access_keys(account_id);
         let raw_prefix: &[u8] = prefix.as_ref();
         let access_keys = match state_update.iter(&prefix) {
             Ok(iter) => iter
@@ -1253,9 +1250,11 @@ mod test {
     use near_crypto::{InMemorySigner, KeyType, Signer};
     use near_primitives::test_utils::init_test_logger;
     use near_primitives::transaction::{Action, CreateAccountAction, StakeAction};
-    use near_primitives::types::{BlockHeightDelta, Nonce, ValidatorId};
+    use near_primitives::types::{BlockHeightDelta, Nonce, ValidatorId, ValidatorKickoutReason};
     use near_primitives::validator_signer::{InMemoryValidatorSigner, ValidatorSigner};
-    use near_primitives::views::{AccountView, CurrentEpochValidatorInfo, NextEpochValidatorInfo};
+    use near_primitives::views::{
+        AccountView, CurrentEpochValidatorInfo, NextEpochValidatorInfo, ValidatorKickoutView,
+    };
     use near_store::create_store;
     use node_runtime::config::RuntimeConfig;
 
@@ -1382,7 +1381,6 @@ mod test {
                     vec![],
                     vec![],
                     0,
-                    0,
                     genesis_total_supply,
                 )
                 .unwrap();
@@ -1449,7 +1447,6 @@ mod test {
                     self.last_proposals.clone(),
                     challenges_result,
                     chunk_mask,
-                    0,
                     0,
                     self.runtime.genesis.config.total_supply,
                 )
@@ -1859,7 +1856,6 @@ mod test {
                     vec![],
                     vec![true],
                     0,
-                    0,
                     new_env.runtime.genesis.config.total_supply,
                 )
                 .unwrap();
@@ -2011,7 +2007,8 @@ mod test {
                     public_key: block_producers[0].public_key(),
                     stake: 0
                 }
-                .into()]
+                .into()],
+                prev_epoch_kickout: Default::default()
             }
         );
         env.step_default(vec![]);
@@ -2031,6 +2028,13 @@ mod test {
             .into()]
         );
         assert!(response.current_proposals.is_empty());
+        assert_eq!(
+            response.prev_epoch_kickout,
+            vec![ValidatorKickoutView {
+                account_id: "test1".to_string(),
+                reason: ValidatorKickoutReason::Unstaked
+            }]
+        )
     }
 
     #[test]

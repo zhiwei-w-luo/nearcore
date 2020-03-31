@@ -58,7 +58,13 @@ genesis_config_changes = [
   ["epoch_length", 1000]
 ]
 
-num_machines = 30
+num_machines = 100
+
+# machine 0-(k-1) run docker, machine k-100 run binary
+num_docker_machines = 0
+
+# docker image to use
+docker_image = 'nearprotocol/nearcore:master'
 
 # 25 zones, each zone 4 instances
 # 5 asia, 1 australia, 5 europe, 1 canada, 13 us
@@ -183,7 +189,7 @@ with open('/tmp/near/accounts.csv', 'w', newline='') as f:
     writer = csv.DictWriter(f, fieldnames=fieldnames)
     writer.writeheader()
     amount = 1000 * 10 ** 24
-    stake = 10 * 10 ** 24
+    staked_amount = 10 * 10 ** 24
 
     for i in range(num_machines):
         writer.writerow({
@@ -192,7 +198,7 @@ with open('/tmp/near/accounts.csv', 'w', newline='') as f:
             'full_pks': get_full_pks(i),
             'amount': amount,
             'is_treasury': 'true' if i == 0 else 'false',
-            'validator_stake': stake,
+            'validator_stake': staked_amount,
             'validator_key': get_validator_key(i),
             'peer_info': f'{get_pubkey(i)}@{machines[i].ip}:24567'
         })
@@ -223,14 +229,17 @@ pmap(upload_genesis_files, range(num_machines))
 pbar.close()
 
 pbar = tqdm(total=num_machines, desc=' start near')
-def start_nearcore(m, use_valgrind=True):
-    if use_valgrind:
-        m.run_detach_tmux(
-            'cd nearcore && export RUST_BACKTRACE=1 && valgrind --tool=massif target/release/near run')
+def start_nearcore(i):
+    m = machines[i]
+    if i < num_docker_machines:
+        m.run('bash', input=f'''
+docker run -d -u $UID:$UID -v /home/{m.username}/.near:/srv/near \
+    -p 3030:3030 -p 24567:24567 --name nearcore {docker_image} near --home=/srv/near run
+''')
     else:
         m.run_detach_tmux(
-            'cd nearcore && export RUST_BACKTRACE=1 && target/release/near run')
+            'cd nearcore && export RUST_LOG=diagnostic=trace && target/release/near run --archive')
     pbar.update(1)
 
-pmap(start_nearcore, machines)
+pmap(start_nearcore, range(len(machines)))
 pbar.close()

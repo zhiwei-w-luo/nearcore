@@ -216,6 +216,17 @@ impl Handler<NetworkClientMessages> for ClientActor {
                         }
                         NetworkClientResponses::NoResponse
                     }
+                    NetworkAdversarialMessage::AdvSwitchToHeight(height) => {
+                        info!(target: "adversary", "Switching to height {:?}", height);
+                        let mut chain_store_update = self.client.chain.mut_store().store_update();
+                        chain_store_update.save_largest_skipped_height(&height);
+                        chain_store_update.save_largest_approved_height(&height);
+                        chain_store_update
+                            .adv_save_latest_known(height)
+                            .expect("adv method should not fail");
+                        chain_store_update.commit().expect("adv method should not fail");
+                        NetworkClientResponses::NoResponse
+                    }
                     NetworkAdversarialMessage::AdvGetSavedBlocks => {
                         info!(target: "adversary", "Requested number of saved blocks");
                         let store = self.client.chain.store().store();
@@ -713,7 +724,13 @@ impl ClientActor {
             // Don't care about challenge here since it will be handled when we actually process
             // the block.
             if self.client.chain.process_block_header(&block.header, |_| {}).is_ok() {
-                self.client.rebroadcast_block(block.clone());
+                let head = self.client.chain.head()?;
+                // do not broadcast blocks that are too far back.
+                if head.height < block.header.inner_lite.height
+                    || head.epoch_id == block.header.inner_lite.epoch_id
+                {
+                    self.client.rebroadcast_block(block.clone());
+                }
             }
         }
         let (accepted_blocks, result) = self.client.process_block(block, provenance);
@@ -730,12 +747,13 @@ impl ClientActor {
     ) -> NetworkClientResponses {
         let hash = block.hash();
         info!(
-            "%%% {:?} Received block {} <- {} at {} from {}",
+            "%%% {:?} Received block {} <- {} at {} from {}. was requested {}",
             self.client.validator_signer.as_ref().map(|vs| vs.validator_id()),
             hash,
             block.header.prev_hash,
             block.header.inner_lite.height,
-            peer_id
+            peer_id,
+            was_requested
         );
         debug!(target: "client", "{:?} Received block {} <- {} at {} from {}", self.client.validator_signer.as_ref().map(|vs| vs.validator_id()), hash, block.header.prev_hash, block.header.inner_lite.height, peer_id);
         let prev_hash = block.header.prev_hash;
