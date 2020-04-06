@@ -102,7 +102,10 @@ class RemoteNode(GCloudNode):
             if self.signer_key.account_id in cur_validators:
                 self.state = NodeState.VALIDATING
         elif self.state is NodeState.VALIDATING:
-            assert self.signer_key.account_id in cur_validators, f'invariant failed: {self.signer_key.account_id} not in {cur_validators}'
+            if self.signer_key.account_id not in cur_validators:
+                print(f'{self.signer_key.account_id} changed from validating to nonvalidating without unstaking')
+                self.state = NodeState.NONVALIDATING
+                return
             if bool(random.getrandbits(1)):
                 self.send_unstaking_tx()
                 self.state = NodeState.UNSTAKED
