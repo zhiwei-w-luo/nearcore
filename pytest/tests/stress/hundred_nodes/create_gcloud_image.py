@@ -1,4 +1,3 @@
-import sys
 import os
 import datetime
 from rc import gcloud, run
@@ -51,7 +50,7 @@ source ~/.cargo/env
 
 git clone --single-branch --branch {branch} https://github.com/nearprotocol/nearcore.git nearcore
 cd nearcore
-cargo build -p near --release {additional_flags}
+cargo build -p neard --release {additional_flags}
 ''')
 assert p.returncode == 0
 

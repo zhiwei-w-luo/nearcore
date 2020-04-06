@@ -6,7 +6,6 @@ use std::sync::Arc;
 use borsh::{BorshDeserialize, BorshSerialize};
 use cached::{Cached, SizedCache};
 use chrono::Utc;
-use log::info;
 use serde::Serialize;
 
 use near_primitives::block::{Approval, BlockScore};
@@ -20,11 +19,12 @@ use near_primitives::sharding::{
 use near_primitives::transaction::{
     ExecutionOutcomeWithId, ExecutionOutcomeWithIdAndProof, SignedTransaction,
 };
+use near_primitives::trie_key::{trie_key_parsers, TrieKey};
 use near_primitives::types::{
     AccountId, BlockExtra, BlockHeight, ChunkExtra, EpochId, ShardId, StateChanges,
     StateChangesExt, StateChangesKinds, StateChangesKindsExt, StateChangesRequest, StateHeaderKey,
 };
-use near_primitives::utils::{index_to_bytes, to_timestamp, trie_key_parsers, TrieKey};
+use near_primitives::utils::{index_to_bytes, to_timestamp};
 use near_primitives::views::LightClientBlockView;
 use near_store::{
     read_with_cache, ColBlock, ColBlockExtra, ColBlockHeader, ColBlockHeight, ColBlockMisc,
@@ -357,7 +357,7 @@ impl ChainStore {
         self.store.clone()
     }
 
-    pub fn store_update(&mut self) -> ChainStoreUpdate {
+    pub fn store_update(&mut self) -> ChainStoreUpdate<'_> {
         ChainStoreUpdate::new(self)
     }
 
@@ -482,7 +482,10 @@ impl ChainStoreAccess for ChainStore {
 
     /// The chain tail height, used by GC.
     fn tail(&self) -> Result<BlockHeight, Error> {
-        option_to_not_found(self.store.get_ser(ColBlockMisc, TAIL_KEY), "TAIL")
+        self.store
+            .get_ser(ColBlockMisc, TAIL_KEY)
+            .map(|option| option.unwrap_or_else(|| self.genesis_height))
+            .map_err(|e| e.into())
     }
 
     /// The "sync" head: last header we received from syncing.
@@ -1149,16 +1152,7 @@ impl<'a> ChainStoreAccess for ChainStoreUpdate<'a> {
         if let Some(tail) = &self.tail {
             Ok(tail.clone())
         } else {
-            match self.chain_store.tail() {
-                Ok(tail) => Ok(tail),
-                Err(e) => match e.kind() {
-                    ErrorKind::DBNotFoundErr(_) => {
-                        info!(target: "chain", "No tail found in DB, use genesis height instead");
-                        Ok(self.get_genesis_height())
-                    }
-                    _ => Err(e),
-                },
-            }
+            self.chain_store.tail()
         }
     }
 

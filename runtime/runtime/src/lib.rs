@@ -17,11 +17,12 @@ use near_primitives::state_record::StateRecord;
 use near_primitives::transaction::{
     Action, ExecutionOutcome, ExecutionOutcomeWithId, ExecutionStatus, LogEntry, SignedTransaction,
 };
+use near_primitives::trie_key::{trie_key_parsers, TrieKey};
 use near_primitives::types::{
-    AccountId, Balance, BlockHeight, BlockHeightDelta, EpochHeight, Gas, Nonce, RawStateChanges,
-    StateChangeCause, StateRoot, ValidatorStake,
+    AccountId, Balance, BlockHeight, BlockHeightDelta, EpochHeight, Gas, Nonce,
+    RawStateChangesWithTrieKey, StateChangeCause, StateRoot, ValidatorStake,
 };
-use near_primitives::utils::{create_nonce_with_nonce, system_account, trie_key_parsers, TrieKey};
+use near_primitives::utils::{create_nonce_with_nonce, system_account};
 use near_store::{
     get, get_account, get_postponed_receipt, get_received_data, remove_postponed_receipt, set,
     set_access_key, set_account, set_code, set_postponed_receipt, set_received_data, StorageError,
@@ -105,7 +106,7 @@ pub struct ApplyResult {
     pub validator_proposals: Vec<ValidatorStake>,
     pub outgoing_receipts: Vec<Receipt>,
     pub outcomes: Vec<ExecutionOutcomeWithId>,
-    pub state_changes: RawStateChanges,
+    pub state_changes: Vec<RawStateChangesWithTrieKey>,
     pub stats: ApplyStats,
 }
 
@@ -296,9 +297,11 @@ impl Runtime {
                 near_metrics::inc_counter(&metrics::ACTION_CREATE_ACCOUNT_TOTAL);
                 action_create_account(
                     &self.config.transaction_costs,
+                    &self.config.account_creation_config,
                     account,
                     actor_id,
-                    receipt,
+                    &receipt.receiver_id,
+                    &receipt.predecessor_id,
                     &mut result,
                 );
             }
@@ -1074,10 +1077,9 @@ impl Runtime {
         )?;
 
         state_update.commit(StateChangeCause::UpdatedDelayedReceipts);
-        // TODO(#2327): Avoid cloning.
-        let state_changes = state_update.committed_updates_per_cause().clone();
 
-        let trie_changes = state_update.finalize()?;
+        let (trie_changes, state_changes) = state_update.finalize()?;
+
         let state_root = trie_changes.new_root;
         Ok(ApplyResult {
             state_root,
@@ -1272,6 +1274,7 @@ impl Runtime {
         let (store_update, state_root) = state_update
             .finalize()
             .expect("Genesis state update failed")
+            .0
             .into(trie)
             .expect("Genesis state update failed");
         (store_update, state_root)
@@ -1290,13 +1293,17 @@ mod tests {
     use near_store::test_utils::create_trie;
     use testlib::runtime_utils::{alice_account, bob_account};
 
-    const GAS_PRICE: Balance = 100;
+    const GAS_PRICE: Balance = 5000;
+
+    fn to_yocto(near: Balance) -> Balance {
+        near * 10u128.pow(24)
+    }
 
     #[test]
     fn test_get_and_set_accounts() {
         let trie = create_trie();
         let mut state_update = TrieUpdate::new(trie, MerkleHash::default());
-        let test_account = Account::new(10, hash(&[]));
+        let test_account = Account::new(to_yocto(10), hash(&[]));
         let account_id = bob_account();
         set_account(&mut state_update, account_id.clone(), &test_account);
         let get_res = get_account(&state_update, &account_id).unwrap().unwrap();
@@ -1308,11 +1315,12 @@ mod tests {
         let trie = create_trie();
         let root = MerkleHash::default();
         let mut state_update = TrieUpdate::new(trie.clone(), root);
-        let test_account = Account::new(10, hash(&[]));
+        let test_account = Account::new(to_yocto(10), hash(&[]));
         let account_id = bob_account();
         set_account(&mut state_update, account_id.clone(), &test_account);
         state_update.commit(StateChangeCause::InitialState);
-        let (store_update, new_root) = state_update.finalize().unwrap().into(trie.clone()).unwrap();
+        let (store_update, new_root) =
+            state_update.finalize().unwrap().0.into(trie.clone()).unwrap();
         store_update.commit().unwrap();
         let new_state_update = TrieUpdate::new(trie.clone(), new_root);
         let get_res = get_account(&new_state_update, &account_id).unwrap().unwrap();
@@ -1347,7 +1355,7 @@ mod tests {
             &AccessKey::full_access(),
         );
         initial_state.commit(StateChangeCause::InitialState);
-        let trie_changes = initial_state.finalize().unwrap();
+        let trie_changes = initial_state.finalize().unwrap().0;
         let (store_update, root) = trie_changes.into(trie.clone()).unwrap();
         store_update.commit().unwrap();
 
@@ -1365,17 +1373,18 @@ mod tests {
 
     #[test]
     fn test_apply_no_op() {
-        let (runtime, trie, root, apply_state, _) = setup_runtime(1_000_000, 0, 10_000_000);
+        let (runtime, trie, root, apply_state, _) =
+            setup_runtime(to_yocto(1_000_000), 0, 10u64.pow(15));
         runtime.apply(trie, root, &None, &apply_state, &[], &[]).unwrap();
     }
 
     #[test]
     fn test_apply_check_balance_validation_rewards() {
-        let initial_locked = 500_000;
-        let reward = 10_000_000;
-        let small_refund = 500;
+        let initial_locked = to_yocto(500_000);
+        let reward = to_yocto(10_000_000);
+        let small_refund = to_yocto(500);
         let (runtime, trie, root, apply_state, _) =
-            setup_runtime(1_000_000, initial_locked, 10_000_000);
+            setup_runtime(to_yocto(1_000_000), initial_locked, 10u64.pow(15));
 
         let validator_accounts_update = ValidatorAccountsUpdate {
             stake_info: vec![(alice_account(), initial_locked)].into_iter().collect(),
@@ -1399,9 +1408,9 @@ mod tests {
 
     #[test]
     fn test_apply_delayed_receipts_feed_all_at_once() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let gas_limit = 1;
         let (runtime, trie, mut root, apply_state, _) =
             setup_runtime(initial_balance, initial_locked, gas_limit);
@@ -1431,9 +1440,9 @@ mod tests {
 
     #[test]
     fn test_apply_delayed_receipts_add_more_using_chunks() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let (runtime, trie, mut root, mut apply_state, _) =
             setup_runtime(initial_balance, initial_locked, 1);
 
@@ -1468,9 +1477,9 @@ mod tests {
 
     #[test]
     fn test_apply_delayed_receipts_adjustable_gas_limit() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let (runtime, trie, mut root, mut apply_state, _) =
             setup_runtime(initial_balance, initial_locked, 1);
 
@@ -1525,7 +1534,7 @@ mod tests {
                 receipt: ReceiptEnum::Action(ActionReceipt {
                     signer_id: bob_account(),
                     signer_public_key: PublicKey::empty(KeyType::ED25519),
-                    gas_price: 100,
+                    gas_price: GAS_PRICE,
                     output_data_receivers: vec![],
                     input_data_ids: vec![],
                     actions: vec![Action::Transfer(TransferAction {
@@ -1538,9 +1547,9 @@ mod tests {
 
     #[test]
     fn test_apply_delayed_receipts_local_tx() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let (mut runtime, trie, root, mut apply_state, signer) =
             setup_runtime(initial_balance, initial_locked, 1);
 
@@ -1696,9 +1705,9 @@ mod tests {
 
     #[test]
     fn test_apply_invalid_incoming_receipts() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let gas_limit = 1;
         let (runtime, trie, root, apply_state, _) =
             setup_runtime(initial_balance, initial_locked, gas_limit);
@@ -1720,9 +1729,9 @@ mod tests {
 
     #[test]
     fn test_apply_invalid_delayed_receipts() {
-        let initial_balance = 1_000_000;
-        let initial_locked = 500_000;
-        let small_transfer = 10_000;
+        let initial_balance = to_yocto(1_000_000);
+        let initial_locked = to_yocto(500_000);
+        let small_transfer = to_yocto(10_000);
         let gas_limit = 1;
         let (runtime, trie, root, apply_state, _) =
             setup_runtime(initial_balance, initial_locked, gas_limit);
@@ -1739,7 +1748,7 @@ mod tests {
             .unwrap();
         set(&mut state_update, TrieKey::DelayedReceiptIndices, &delayed_receipts_indices);
         state_update.commit(StateChangeCause::UpdatedDelayedReceipts);
-        let trie_changes = state_update.finalize().unwrap();
+        let trie_changes = state_update.finalize().unwrap().0;
         let (store_update, root) = trie_changes.into(trie.clone()).unwrap();
         store_update.commit().unwrap();
 
