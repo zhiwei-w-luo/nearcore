@@ -265,6 +265,8 @@ pub fn setup_mock_all_validators(
     for (index, account_id) in
         validators.iter().flatten().enumerate().map(|(i, acc)| (i, acc.clone())).collect::<Vec<_>>()
     {
+        let stats = Arc::new(RwLock::new((0u64, 0u64, 0u64)));
+        let stats1 = stats.clone();
         let view_client_addr = Arc::new(RwLock::new(None));
         let view_client_addr1 = view_client_addr.clone();
         let validators_clone1 = validators_clone.clone();
@@ -381,6 +383,7 @@ pub fn setup_mock_all_validators(
                                     }
                                 }
                             }
+                            stats1.write().unwrap().0 += 1;
                         }
                         NetworkRequests::PartialEncodedChunkResponse {
                             route_back,
@@ -397,6 +400,7 @@ pub fn setup_mock_all_validators(
                                     }
                                 }
                             }
+                            stats1.write().unwrap().1 += 1;
                         }
                         NetworkRequests::PartialEncodedChunkMessage {
                             account_id,
@@ -413,6 +417,9 @@ pub fn setup_mock_all_validators(
                                     }
                                 }
                             }
+                            let mut stats1 = stats.write().unwrap();
+                            stats1.2 += 1;
+                            println!("MOO {} {} {}", stats1.0, stats1.1, stats1.2);
                         }
                         NetworkRequests::BlockRequest { hash, peer_id } => {
                             for (i, peer_info) in key_pairs.iter().enumerate() {

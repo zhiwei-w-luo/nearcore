@@ -36,8 +36,8 @@ pub use crate::types::Error;
 mod chunk_cache;
 mod types;
 
-const CHUNK_REQUEST_RETRY_MS: u64 = 100;
-const CHUNK_REQUEST_SWITCH_TO_OTHERS_MS: u64 = 400;
+const CHUNK_REQUEST_RETRY_MS: u64 = 400;
+const CHUNK_REQUEST_SWITCH_TO_OTHERS_MS: u64 = 600;
 const CHUNK_REQUEST_SWITCH_TO_FULL_FETCH_MS: u64 = 3_000;
 const CHUNK_REQUEST_RETRY_MAX_MS: u64 = 100_000;
 const ACCEPTING_SEAL_PERIOD_MS: i64 = 30_000;
@@ -297,6 +297,8 @@ impl ShardsManager {
     ) -> Result<(), Error> {
         let mut bp_to_parts = HashMap::new();
 
+        //println!("MOO {} WTF {}", chunk_hash.0, self.me.as_ref().unwrap());
+
         let cache_entry = self.encoded_chunks.get(chunk_hash);
 
         let request_full = force_request_full
@@ -465,14 +467,6 @@ impl ShardsManager {
                     added: Instant::now(),
                 },
             );
-            self.request_partial_encoded_chunk(
-                height,
-                &parent_hash,
-                shard_id,
-                &chunk_hash,
-                false,
-                false,
-            )?;
         }
         Ok(())
     }
@@ -747,6 +741,13 @@ impl ShardsManager {
     ) -> Result<ProcessPartialEncodedChunkResult, Error> {
         // Check validity first
 
+        /*println!(
+            "MOO {}:{:?} received {}",
+            partial_encoded_chunk.chunk_hash.0,
+            partial_encoded_chunk.parts.iter().map(|x| x.part_ord).collect::<Vec<_>>(),
+            self.me.as_ref().unwrap(),
+        );*/
+
         // 1. Checking chunk header existence
         let chunk_hash = partial_encoded_chunk.chunk_hash.clone();
         let header = match &partial_encoded_chunk.header {
@@ -857,6 +858,16 @@ impl ShardsManager {
             }
         }
 
+        if partial_encoded_chunk.header.is_some()
+            && partial_encoded_chunk.parts.len() > 0
+            && Some(self.runtime_adapter.get_part_owner(
+                &partial_encoded_chunk.header.as_ref().unwrap().inner.prev_block_hash,
+                partial_encoded_chunk.parts[0].part_ord,
+            )?) == self.me
+        {
+            self.send_partial_encoded_chunk_to_chunk_trackers(&partial_encoded_chunk).unwrap();
+        }
+
         // Consider it valid
         // Store chunk hash into chunk_hash_per_height_shard collection
         let mut store_update = chain_store.store_update();
@@ -897,7 +908,7 @@ impl ShardsManager {
             header.inner.height_created,
             header.inner.shard_id,
         )?;
-        let have_all_seal = seal.process(entry);
+        let have_all_seal = true; //seal.process(entry);
 
         if have_all_parts && have_all_receipts && have_all_seal {
             let cares_about_shard = self.cares_about_shard_this_or_next_epoch(
@@ -1170,6 +1181,57 @@ impl ShardsManager {
         self.encoded_chunks.insert(cache_entry.header.chunk_hash().clone(), cache_entry);
     }
 
+    pub fn send_partial_encoded_chunk_to_chunk_trackers(
+        &mut self,
+        partial_encoded_chunk: &PartialEncodedChunk,
+    ) -> Result<(), Error> {
+        let parent_hash = partial_encoded_chunk.header.as_ref().unwrap().inner.prev_block_hash;
+        let epoch_id = self.runtime_adapter.get_epoch_id_from_prev_block(&parent_hash).unwrap();
+        //println!("MOO about to resend {}", partial_encoded_chunk.chunk_hash.0);
+        for (bp, _) in
+            self.runtime_adapter.get_epoch_block_producers_ordered(&epoch_id, &parent_hash)?
+        {
+            /*println!(
+                "MOO ... {} cares: {} owns: {}",
+                bp.account_id,
+                self.cares_about_shard_this_or_next_epoch(
+                    Some(&bp.account_id),
+                    &parent_hash,
+                    partial_encoded_chunk.shard_id,
+                    false,
+                ),
+                self.runtime_adapter.get_part_owner(
+                    &partial_encoded_chunk.header.as_ref().unwrap().inner.prev_block_hash,
+                    partial_encoded_chunk.parts[0].part_ord,
+                )?
+            );*/
+            if self.cares_about_shard_this_or_next_epoch(
+                Some(&bp.account_id),
+                &parent_hash,
+                partial_encoded_chunk.shard_id,
+                false,
+            ) && self.runtime_adapter.get_part_owner(
+                &partial_encoded_chunk.header.as_ref().unwrap().inner.prev_block_hash,
+                partial_encoded_chunk.parts[0].part_ord,
+            )? != bp.account_id
+            {
+                /*println!(
+                    "MOO {}:{:?} resend {} -> {}",
+                    partial_encoded_chunk.chunk_hash.0,
+                    partial_encoded_chunk.parts.iter().map(|x| x.part_ord).collect::<Vec<_>>(),
+                    self.me.as_ref().unwrap(),
+                    bp.account_id
+                );*/
+                self.network_adapter.do_send(NetworkRequests::PartialEncodedChunkMessage {
+                    account_id: bp.account_id.clone(),
+                    partial_encoded_chunk: partial_encoded_chunk.clone(),
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     pub fn distribute_encoded_chunk(
         &mut self,
         encoded_chunk: EncodedShardChunk,
@@ -1222,6 +1284,13 @@ impl ShardsManager {
             );
 
             if Some(&to_whom) != self.me.as_ref() {
+                /*println!(
+                    "MOO {}:{:?} send {} -> {}",
+                    partial_encoded_chunk.chunk_hash.0,
+                    partial_encoded_chunk.parts.iter().map(|x| x.part_ord).collect::<Vec<_>>(),
+                    self.me.as_ref().unwrap(),
+                    to_whom
+                );*/
                 self.network_adapter.do_send(NetworkRequests::PartialEncodedChunkMessage {
                     account_id: to_whom.clone(),
                     partial_encoded_chunk,
