@@ -863,6 +863,10 @@ fn test_gc_with_epoch_length_common(epoch_length: NumBlocks) {
         println!("height = {}", i);
         if i < epoch_length {
             assert!(env.clients[0].chain.get_block(&blocks[i as usize - 1].hash()).is_err());
+            assert!(matches!(
+                env.clients[0].chain.get_block_by_height(i).unwrap_err().kind(),
+                ErrorKind::BlockMissing(block_height) if block_height == i
+            ));
             assert!(env.clients[0]
                 .chain
                 .mut_store()
@@ -870,6 +874,7 @@ fn test_gc_with_epoch_length_common(epoch_length: NumBlocks) {
                 .is_err());
         } else {
             assert!(env.clients[0].chain.get_block(&blocks[i as usize - 1].hash()).is_ok());
+            assert!(env.clients[0].chain.get_block_by_height(i).is_ok());
             assert!(env.clients[0]
                 .chain
                 .mut_store()

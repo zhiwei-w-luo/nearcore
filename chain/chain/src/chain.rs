@@ -2088,7 +2088,10 @@ impl Chain {
     #[inline]
     pub fn get_block_by_height(&mut self, height: BlockHeight) -> Result<&Block, Error> {
         let hash = self.store.get_block_hash_by_height(height)?;
-        self.store.get_block(&hash)
+        self.store.get_block(&hash).map_err(move |err| match err.kind() {
+            ErrorKind::DBNotFoundErr(_) => ErrorKind::BlockMissing(height).into(),
+            _ => err,
+        })
     }
 
     /// Gets a block header by hash.
