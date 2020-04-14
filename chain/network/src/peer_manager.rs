@@ -398,6 +398,7 @@ impl PeerManagerActor {
     /// Get a random peer we are not connected to from the known list.
     fn sample_random_peer(&self, ignore_list: &HashSet<PeerId>) -> Option<PeerInfo> {
         let unconnected_peers = self.peer_store.unconnected_peers(ignore_list);
+        debug!(target: "network", "Unconnected peers {:?}", unconnected_peers);
         unconnected_peers.choose(&mut rand::thread_rng()).cloned()
     }
 
@@ -560,6 +561,9 @@ impl PeerManagerActor {
         }
 
         if self.is_outbound_bootstrap_needed() {
+            debug!(target: "network", "Outbound is needed. num_active_peers: {} outgoing_peers: {} max_peers: {}", self.active_peers.len(), self.outgoing_peers.len(), self.config.max_peer);
+            debug!(target: "network", "Active peers: {:?}", self.active_peers.keys());
+            debug!(target: "network", "Outgoing peers: {:?}", self.outgoing_peers);
             if let Some(peer_info) = self.sample_random_peer(&self.outgoing_peers) {
                 self.outgoing_peers.insert(peer_info.id.clone());
                 ctx.notify(OutboundTcpConnect { peer_info });
@@ -1239,6 +1243,7 @@ impl Handler<OutboundTcpConnect> for PeerManagerActor {
     type Result = ();
 
     fn handle(&mut self, msg: OutboundTcpConnect, ctx: &mut Self::Context) {
+        debug!(target: "network", "Start outbound connection to: {:?}", msg.peer_info);
         if let Some(addr) = msg.peer_info.addr {
             Resolver::from_registry()
                 .send(ConnectAddr(addr))
