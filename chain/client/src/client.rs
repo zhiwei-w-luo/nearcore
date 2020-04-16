@@ -9,7 +9,7 @@ use cached::{Cached, SizedCache};
 use chrono::Utc;
 use log::{debug, error, info, warn};
 
-use near_chain::chain::{NUM_CHUNK_PRODUCERS_TO_FORWARD_TX, TX_ROUTING_HEIGHT_HORIZON};
+use near_chain::chain::TX_ROUTING_HEIGHT_HORIZON;
 use near_chain::test_utils::format_hash;
 use near_chain::types::{AcceptedBlock, LatestKnown, ReceiptResponse};
 use near_chain::{
@@ -393,7 +393,8 @@ impl Client {
         };
 
         // Get all the current challenges.
-        let challenges = self.challenges.drain().map(|(_, challenge)| challenge).collect();
+        // TODO(2445): Enable challenges when they are working correctly.
+        // let challenges = self.challenges.drain().map(|(_, challenge)| challenge).collect();
 
         let block = Block::produce(
             &prev_header,
@@ -406,7 +407,7 @@ impl Client {
             min_gas_price,
             inflation,
             prev_block_extra.challenges_result,
-            challenges,
+            vec![],
             &*validator_signer,
             score,
             quorums.last_quorum_pre_vote,
@@ -1064,12 +1065,11 @@ impl Client {
         let shard_id = self.runtime_adapter.account_id_to_shard_id(&tx.transaction.signer_id);
 
         let mut validators = HashSet::new();
-        for i in 0..NUM_CHUNK_PRODUCERS_TO_FORWARD_TX {
-            let validator = self.chain.find_chunk_producer_for_forwarding(
-                epoch_id,
-                shard_id,
-                TX_ROUTING_HEIGHT_HORIZON * (i + 1),
-            )?;
+        for horizon in
+            (2..=TX_ROUTING_HEIGHT_HORIZON).chain(vec![TX_ROUTING_HEIGHT_HORIZON * 2].into_iter())
+        {
+            let validator =
+                self.chain.find_chunk_producer_for_forwarding(epoch_id, shard_id, horizon)?;
             validators.insert(validator);
         }
 
@@ -1307,28 +1307,29 @@ impl Client {
     }
 
     /// When accepting challenge, we verify that it's valid given signature with current validators.
-    pub fn process_challenge(&mut self, challenge: Challenge) -> Result<(), Error> {
-        if self.challenges.contains_key(&challenge.hash) {
-            return Ok(());
-        }
-        debug!(target: "client", "Received challenge: {:?}", challenge);
-        let head = self.chain.head()?;
-        if self.runtime_adapter.verify_validator_or_fisherman_signature(
-            &head.epoch_id,
-            &head.prev_block_hash,
-            &challenge.account_id,
-            challenge.hash.as_ref(),
-            &challenge.signature,
-        )? {
-            // If challenge is not double sign, we should process it right away to invalidate the chain.
-            match challenge.body {
-                ChallengeBody::BlockDoubleSign(_) => {}
-                _ => {
-                    self.chain.process_challenge(&challenge);
-                }
-            }
-            self.challenges.insert(challenge.hash, challenge);
-        }
+    pub fn process_challenge(&mut self, _challenge: Challenge) -> Result<(), Error> {
+        // TODO(2445): Enable challenges when they are working correctly.
+        //        if self.challenges.contains_key(&challenge.hash) {
+        //            return Ok(());
+        //        }
+        //        debug!(target: "client", "Received challenge: {:?}", challenge);
+        //        let head = self.chain.head()?;
+        //        if self.runtime_adapter.verify_validator_or_fisherman_signature(
+        //            &head.epoch_id,
+        //            &head.prev_block_hash,
+        //            &challenge.account_id,
+        //            challenge.hash.as_ref(),
+        //            &challenge.signature,
+        //        )? {
+        //            // If challenge is not double sign, we should process it right away to invalidate the chain.
+        //            match challenge.body {
+        //                ChallengeBody::BlockDoubleSign(_) => {}
+        //                _ => {
+        //                    self.chain.process_challenge(&challenge);
+        //                }
+        //            }
+        //            self.challenges.insert(challenge.hash, challenge);
+        //        }
         Ok(())
     }
 }

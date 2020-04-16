@@ -15,6 +15,7 @@ use tracing_subscriber::EnvFilter;
 use git_version::git_version;
 use near_primitives::types::Version;
 use neard::config::init_testnet_configs;
+use neard::genesis_validate::validate_genesis;
 use neard::{get_default_home, get_store_path, init_configs, load_config, start_with_config};
 
 fn init_logging(verbose: Option<&str>) {
@@ -38,11 +39,16 @@ fn init_logging(verbose: Option<&str>) {
     }
 
     if let Ok(rust_log) = env::var("RUST_LOG") {
-        if let Ok(directive) = rust_log.parse() {
+        for directive in rust_log.split(',').filter_map(|s| match s.parse() {
+            Ok(directive) => Some(directive),
+            Err(err) => {
+                eprintln!("Ignoring directive `{}`: {}", s, err);
+                None
+            }
+        }) {
             env_filter = env_filter.add_directive(directive);
         }
     }
-
     tracing_subscriber::fmt::Subscriber::builder()
         .with_env_filter(env_filter)
         .with_writer(io::stderr)
@@ -92,6 +98,7 @@ fn main() {
         .get_matches();
 
     init_logging(matches.value_of("verbose"));
+    info!(target: "near", "Version: {}, Build: {}", version.version, version.build);
 
     #[cfg(feature = "adversarial")]
     {
@@ -146,6 +153,7 @@ fn main() {
         ("run", Some(args)) => {
             // Load configs from home.
             let mut near_config = load_config(home_dir);
+            validate_genesis(&near_config.genesis);
             // Set current version in client config.
             near_config.client_config.version = version;
             // Override some parameters from command line.

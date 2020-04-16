@@ -14,6 +14,7 @@ pytest sanity/state_sync.py onetx 30
 pytest --timeout=600 sanity/state_sync.py onetx 250
 pytest --timeout=240 sanity/state_sync1.py
 pytest --timeout=600 sanity/state_sync2.py
+pytest --timeout=900 sanity/state_sync3.py
 pytest --timeout=600 sanity/state_sync_routed.py manytx 100
 pytest --timeout=300 sanity/state_sync_late.py notx
 pytest sanity/rpc_tx_forwarding.py
@@ -27,6 +28,9 @@ pytest --timeout=240 sanity/restaked.py
 pytest --timeout=240 sanity/rpc_state_changes.py
 pytest --timeout=120 sanity/garbage_collection.py
 pytest --timeout=120 sanity/garbage_collection1.py
+pytest --timeout=300 sanity/gc_after_sync.py
+pytest --timeout=300 sanity/gc_sync_after_sync.py
+pytest --timeout=300 sanity/gc_sync_after_sync.py swap_nodes
 
 # python tests for smart contract deployment and invocation
 pytest contracts/deploy_call_smart_contract.py
@@ -84,13 +88,12 @@ expensive neard sync_state_nodes sync_state_nodes_multishard
 # testnet rpc
 expensive nearcore test_tps_regression test::test_highload
 
-# The next six tests are disabled due to #2208
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_simple_testnet
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_self_call_testnet
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_bad_method_name_testnet
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_empty_method_name_with_no_tokens_testnet
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_empty_method_name_with_tokens_testnet
-# expensive nearcore test_cases_testnet_rpc test::test_smart_contract_with_args_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_simple_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_self_call_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_bad_method_name_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_empty_method_name_with_no_tokens_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_empty_method_name_with_tokens_testnet
+expensive nearcore test_cases_testnet_rpc test::test_smart_contract_with_args_testnet
 expensive nearcore test_cases_testnet_rpc test::test_nonce_update_when_deploying_contract_testnet
 expensive nearcore test_cases_testnet_rpc test::test_nonce_updated_when_tx_failed_testnet
 expensive nearcore test_cases_testnet_rpc test::test_upload_contract_testnet

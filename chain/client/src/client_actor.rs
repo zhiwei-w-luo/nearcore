@@ -49,6 +49,8 @@ use crate::StatusResponse;
 
 /// Multiplier on `max_block_time` to wait until deciding that chain stalled.
 const STATUS_WAIT_TIME_MULTIPLIER: u64 = 10;
+/// Drop blocks whose height are beyond head + horizon.
+const BLOCK_HORIZON: u64 = 500;
 
 pub struct ClientActor {
     /// Adversarial controls
@@ -748,6 +750,12 @@ impl ClientActor {
         was_requested: bool,
     ) -> NetworkClientResponses {
         let hash = block.hash();
+        // drop the block if it is too far ahead
+        let head = unwrap_or_return!(self.client.chain.head(), NetworkClientResponses::NoResponse);
+        if block.header.inner_lite.height >= head.height + BLOCK_HORIZON {
+            debug!(target: "client", "dropping block {} that is too far ahead. Block height {} current head height {}", block.hash(), block.header.inner_lite.height, head.height);
+            return NetworkClientResponses::NoResponse;
+        }
         info!(
             "%%% {:?} Received block {} <- {} at {} from {}. was requested {}",
             self.client.validator_signer.as_ref().map(|vs| vs.validator_id()),
@@ -757,7 +765,6 @@ impl ClientActor {
             peer_id,
             was_requested
         );
-        debug!(target: "client", "{:?} Received block {} <- {} at {} from {}", self.client.validator_signer.as_ref().map(|vs| vs.validator_id()), hash, block.header.prev_hash, block.header.inner_lite.height, peer_id);
         let prev_hash = block.header.prev_hash;
         let provenance =
             if was_requested { near_chain::Provenance::SYNC } else { near_chain::Provenance::NONE };
@@ -1081,6 +1088,12 @@ impl ClientActor {
                         )
                     })
                     .collect();
+
+                if !self.client.config.archive {
+                    // TODO #2464 enable it
+                    //unwrap_or_run_later!(self.client.chain.reset_data_pre_state_sync(sync_hash));
+                }
+
                 match unwrap_or_run_later!(self.client.state_sync.run(
                     &me,
                     sync_hash,
@@ -1098,8 +1111,12 @@ impl ClientActor {
                                 highest_height_peer(&self.network_info.highest_height_peers)
                             {
                                 if let Ok(header) = self.client.chain.get_block_header(&sync_hash) {
-                                    let prev_hash = header.prev_hash;
-                                    self.request_block_by_hash(prev_hash, peer_info.peer_info.id);
+                                    for hash in vec![header.prev_hash, header.hash].into_iter() {
+                                        self.request_block_by_hash(
+                                            hash,
+                                            peer_info.peer_info.id.clone(),
+                                        );
+                                    }
                                 }
                             }
                         }
@@ -1146,7 +1163,7 @@ impl ClientActor {
 
     /// Periodically log summary.
     fn log_summary(&self, ctx: &mut Context<Self>) {
-        ctx.run_later(self.client.config.log_summary_period, move |act, ctx| {
+        ctx.run_interval(self.client.config.log_summary_period, move |act, _ctx| {
             let head = unwrap_or_return!(act.client.chain.head());
             let validators = unwrap_or_return!(act
                 .client
@@ -1180,6 +1197,7 @@ impl ClientActor {
             };
 
             act.info_helper.info(
+                act.client.chain.store().get_genesis_height(),
                 &head,
                 &act.client.sync_status,
                 &act.node_id,
@@ -1188,8 +1206,6 @@ impl ClientActor {
                 is_fishermen,
                 num_validators,
             );
-
-            act.log_summary(ctx);
         });
     }
 }

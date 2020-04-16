@@ -15,7 +15,7 @@ use chrono::offset::TimeZone;
 use chrono::{DateTime, Utc};
 use futures::task::Poll;
 use futures::{future, Stream, StreamExt};
-use rand::{thread_rng, Rng};
+use rand::seq::SliceRandom;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_util::codec::FramedRead;
 use tracing::{debug, error, info, trace, warn};
@@ -29,7 +29,7 @@ use near_store::Store;
 use crate::codec::Codec;
 use crate::metrics;
 use crate::peer::Peer;
-use crate::peer_store::PeerStore;
+use crate::peer_store::{PeerStore, TrustLevel};
 #[cfg(feature = "metric_recorder")]
 use crate::recorder::{MetricRecorder, PeerMessageMetadata};
 use crate::routing::{Edge, EdgeInfo, EdgeType, ProcessEdgeResult, RoutingTable};
@@ -75,6 +75,8 @@ struct ActivePeer {
     sent_bytes_per_sec: u64,
     /// Last time requested peers.
     last_time_peer_requested: DateTime<Utc>,
+    /// Who started connection. Inbound (other) or Outbound (us).
+    peer_type: PeerType,
 }
 
 /// Actor that manages peers connections.
@@ -168,7 +170,7 @@ impl PeerManagerActor {
             self.outgoing_peers.remove(&full_peer_info.peer_info.id);
         }
         unwrap_or_error!(
-            self.peer_store.peer_connected(&full_peer_info),
+            self.peer_store.peer_connected(&full_peer_info.peer_info),
             "Failed to save peer data"
         );
 
@@ -190,6 +192,7 @@ impl PeerManagerActor {
                 sent_bytes_per_sec: 0,
                 received_bytes_per_sec: 0,
                 last_time_peer_requested: Utc.timestamp(0, 0),
+                peer_type,
             },
         );
 
@@ -228,7 +231,24 @@ impl PeerManagerActor {
         });
     }
 
-    fn remove_active_peer(&mut self, ctx: &mut Context<Self>, peer_id: &PeerId) {
+    /// Remove peer from active set.
+    /// Check it match peer_type to avoid removing a peer that both started connection to each other.
+    /// If peer_type is None, remove anyway disregarding who started the connection.
+    fn remove_active_peer(
+        &mut self,
+        ctx: &mut Context<Self>,
+        peer_id: &PeerId,
+        peer_type: Option<PeerType>,
+    ) {
+        if let Some(peer_type) = peer_type {
+            if let Some(peer) = self.active_peers.get(&peer_id) {
+                if peer.peer_type != peer_type {
+                    // Don't remove the peer
+                    return;
+                }
+            }
+        }
+
         // If the last edge we have with this peer represent a connection addition, create the edge
         // update that represents the connection removal.
         self.active_peers.remove(&peer_id);
@@ -247,21 +267,41 @@ impl PeerManagerActor {
 
     /// Remove a peer from the active peer set. If the peer doesn't belong to the active peer set
     /// data from ongoing connection established is removed.
-    fn unregister_peer(&mut self, ctx: &mut Context<Self>, peer_id: PeerId) {
+    fn unregister_peer(&mut self, ctx: &mut Context<Self>, peer_id: PeerId, peer_type: PeerType) {
         // If this is an unconsolidated peer because failed / connected inbound, just delete it.
-        if self.outgoing_peers.contains(&peer_id) {
+        if peer_type == PeerType::Outbound && self.outgoing_peers.contains(&peer_id) {
             self.outgoing_peers.remove(&peer_id);
             return;
         }
-        self.remove_active_peer(ctx, &peer_id);
+        self.remove_active_peer(ctx, &peer_id, Some(peer_type));
         unwrap_or_error!(self.peer_store.peer_disconnected(&peer_id), "Failed to save peer data");
     }
 
     /// Add peer to ban list.
+    /// This function should only be called after Peer instance is stopped.
+    /// Note: Use `try_ban_peer` if there might be a Peer instance still active.
     fn ban_peer(&mut self, ctx: &mut Context<Self>, peer_id: &PeerId, ban_reason: ReasonForBan) {
         info!(target: "network", "Banning peer {:?} for {:?}", peer_id, ban_reason);
-        self.remove_active_peer(ctx, peer_id);
+        self.remove_active_peer(ctx, peer_id, None);
         unwrap_or_error!(self.peer_store.peer_ban(peer_id, ban_reason), "Failed to save peer data");
+    }
+
+    /// Ban peer. Stop peer instance if it is still active,
+    /// and then mark peer as banned in the peer store.
+    pub(crate) fn try_ban_peer(
+        &mut self,
+        ctx: &mut Context<Self>,
+        peer_id: &PeerId,
+        ban_reason: ReasonForBan,
+    ) {
+        if let Some(peer) = self.active_peers.get(&peer_id) {
+            let _ = peer.addr.do_send(PeerManagerRequest::BanPeer(ban_reason));
+        } else {
+            warn!(target: "network", "Try to ban a disconnected peer for {:?}: {:?}", ban_reason, peer_id);
+            // Call `ban_peer` in peer manager to trigger action that persists information
+            // of ban in disk.
+            self.ban_peer(ctx, &peer_id, ban_reason);
+        }
     }
 
     /// Connects peer with given TcpStream and optional information if it's outbound.
@@ -378,13 +418,7 @@ impl PeerManagerActor {
     /// Get a random peer we are not connected to from the known list.
     fn sample_random_peer(&self, ignore_list: &HashSet<PeerId>) -> Option<PeerInfo> {
         let unconnected_peers = self.peer_store.unconnected_peers(ignore_list);
-        let index = thread_rng().gen_range(0, std::cmp::max(unconnected_peers.len(), 1));
-
-        unconnected_peers
-            .iter()
-            .enumerate()
-            .filter_map(|(i, v)| if i == index { Some(v.clone()) } else { None })
-            .next()
+        unconnected_peers.choose(&mut rand::thread_rng()).cloned()
     }
 
     /// Query current peers for more peers.
@@ -546,7 +580,9 @@ impl PeerManagerActor {
         }
 
         if self.is_outbound_bootstrap_needed() {
-            if let Some(peer_info) = self.sample_random_peer(&self.outgoing_peers) {
+            let mut ignore_list = self.outgoing_peers.clone();
+            ignore_list.insert(self.peer_id.clone());
+            if let Some(peer_info) = self.sample_random_peer(&ignore_list) {
                 self.outgoing_peers.insert(peer_info.id.clone());
                 ctx.notify(OutboundTcpConnect { peer_info });
             } else {
@@ -944,15 +980,7 @@ impl Handler<NetworkRequests> for PeerManagerActor {
                 }
             }
             NetworkRequests::BanPeer { peer_id, ban_reason } => {
-                if let Some(peer) = self.active_peers.get(&peer_id) {
-                    let _ = peer.addr.do_send(PeerManagerRequest::BanPeer(ban_reason));
-                } else {
-                    warn!(target: "network", "Try to ban a disconnected peer for {:?}: {:?}", ban_reason, peer_id);
-                    // Call `ban_peer` in peer manager to trigger action that persists information
-                    // of ban in disk.
-                    self.ban_peer(ctx, &peer_id, ban_reason);
-                }
-
+                self.try_ban_peer(ctx, &peer_id, ban_reason);
                 NetworkResponses::NoResponse
             }
             NetworkRequests::AnnounceAccount(announce_account) => {
@@ -1273,11 +1301,17 @@ impl Handler<Consolidate> for PeerManagerActor {
             return ConsolidateResponse::Reject;
         }
 
+        if self.peer_store.is_banned(&msg.peer_info.id) {
+            debug!(target: "network", "Dropping connection from banned peer: {:?}", msg.peer_info.id);
+            return ConsolidateResponse::Reject;
+        }
+
         // We already connected to this peer.
         if self.active_peers.contains_key(&msg.peer_info.id) {
             debug!(target: "network", "Dropping handshake (Active Peer). {:?} {:?}", self.peer_id, msg.peer_info.id);
             return ConsolidateResponse::Reject;
         }
+
         // This is incoming connection but we have this peer already in outgoing.
         // This only happens when both of us connect at the same time, break tie using higher peer id.
         if msg.peer_type == PeerType::Inbound && self.outgoing_peers.contains(&msg.peer_info.id) {
@@ -1338,7 +1372,7 @@ impl Handler<Unregister> for PeerManagerActor {
     type Result = ();
 
     fn handle(&mut self, msg: Unregister, ctx: &mut Self::Context) {
-        self.unregister_peer(ctx, msg.peer_id);
+        self.unregister_peer(ctx, msg.peer_id, msg.peer_type);
     }
 }
 
@@ -1362,8 +1396,11 @@ impl Handler<PeersResponse> for PeerManagerActor {
     type Result = ();
 
     fn handle(&mut self, msg: PeersResponse, _ctx: &mut Self::Context) {
-        self.peer_store.add_peers(
-            msg.peers.into_iter().filter(|peer_info| peer_info.id != self.peer_id).collect(),
+        unwrap_or_error!(
+            self.peer_store.add_indirect_peers(
+                msg.peers.into_iter().filter(|peer_info| peer_info.id != self.peer_id).collect()
+            ),
+            "Fail to update peer store"
         );
     }
 }
@@ -1426,6 +1463,12 @@ impl Handler<PeerRequest> for PeerManagerActor {
                     ctx,
                     RawRoutedMessage { target: AccountOrPeerIdOrHash::Hash(target), body },
                 );
+                PeerResponse::NoResponse
+            }
+            PeerRequest::UpdatePeerInfo(peer_info) => {
+                if let Err(err) = self.peer_store.add_trusted_peer(peer_info, TrustLevel::Direct) {
+                    error!(target: "network", "Fail to update peer store: {}", err);
+                }
                 PeerResponse::NoResponse
             }
         }
